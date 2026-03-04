@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import requests
 
@@ -41,11 +41,8 @@ PLAYER_BASE_COLUMNS = [
     "GP-GS",
     "MIN",
     "PTS",
-    "PPG",
     "REB",
-    "RPG",
     "AST",
-    "APG",
     "TO",
     "STL",
     "BLK",
@@ -218,6 +215,11 @@ def format_pct(makes: int, attempts: int) -> str:
     return f"{makes / attempts:.3f}".lstrip("0") if attempts > 0 else ""
 
 
+def format_minutes(seconds_played: int) -> str:
+    total_seconds = max(int(seconds_played or 0), 0)
+    return f"{total_seconds / 60:.1f}"
+
+
 def field_goal_breakdown_metrics(
     *,
     fgm: int,
@@ -269,6 +271,7 @@ def player_display_row(
     player_name: str,
     games_played: int,
     games_started: int,
+    seconds_played: int = 0,
     points: int,
     rebounds: int,
     assists: int,
@@ -294,13 +297,10 @@ def player_display_row(
         "row_key": row_key,
         "Player": player_name,
         "GP-GS": f"{gp}-{max(int(games_started), 0)}",
-        "MIN": "",
+        "MIN": format_minutes(seconds_played),
         "PTS": str(points),
-        "PPG": f"{points / gp:.1f}" if gp else "",
         "REB": str(rebounds),
-        "RPG": f"{rebounds / gp:.1f}" if gp else "",
         "AST": str(assists),
-        "APG": f"{assists / gp:.1f}" if gp else "",
         "TO": str(turnovers),
         "STL": str(steals),
         "BLK": str(blocks),
@@ -338,6 +338,112 @@ def classify_shot_zone(play_type: str, points_attempted: int) -> Optional[str]:
     if normalized == "jumpshot" and points_attempted == 2:
         return "mid"
     return None
+
+
+def compute_seconds_played_from_pbp(
+    plays: Sequence[Dict[str, Any]],
+    starting_lineups: Dict[str, Set[str]],
+) -> Dict[str, Dict[str, int]]:
+    seconds_by_team: Dict[str, Dict[str, int]] = {}
+    on_court: Dict[str, Set[str]] = {}
+
+    def ensure_player(team_id: str, athlete_id: str) -> None:
+        if not team_id or not athlete_id:
+            return
+        seconds_by_team.setdefault(team_id, {})
+        seconds_by_team[team_id].setdefault(athlete_id, 0)
+
+    for team_id, lineup in starting_lineups.items():
+        normalized_team_id = str(team_id or "").strip()
+        if not normalized_team_id:
+            continue
+        normalized_lineup = {str(athlete_id or "").strip() for athlete_id in lineup if str(athlete_id or "").strip()}
+        on_court[normalized_team_id] = set(normalized_lineup)
+        seconds_by_team.setdefault(normalized_team_id, {})
+        for athlete_id in normalized_lineup:
+            ensure_player(normalized_team_id, athlete_id)
+
+    period_lengths: Dict[int, int] = {}
+    for play in plays:
+        team_id = str(play.get("team_id") or "").strip()
+        if team_id:
+            on_court.setdefault(team_id, set())
+            seconds_by_team.setdefault(team_id, {})
+        period_number = int(play.get("period_number") or 0)
+        if period_number <= 0:
+            continue
+        clock_seconds = max(int(play.get("clock_seconds") or 0), 0)
+        period_lengths[period_number] = max(period_lengths.get(period_number, 0), clock_seconds)
+
+    if not period_lengths:
+        return seconds_by_team
+
+    period_offsets: Dict[int, int] = {}
+    offset = 0
+    for period_number in sorted(period_lengths):
+        period_offsets[period_number] = offset
+        offset += period_lengths[period_number]
+
+    def accrue_until(target_seconds: int, last_seconds: int) -> int:
+        clamped_target = max(target_seconds, last_seconds)
+        delta = clamped_target - last_seconds
+        if delta <= 0:
+            return clamped_target
+        for team_id, lineup in on_court.items():
+            for athlete_id in lineup:
+                ensure_player(team_id, athlete_id)
+                seconds_by_team[team_id][athlete_id] += delta
+        return clamped_target
+
+    ordered_plays = sorted(
+        plays,
+        key=lambda play: (
+            int(play.get("sequence_number") or play.get("sequence") or 0),
+            str(play.get("play_key") or ""),
+        ),
+    )
+    last_elapsed = 0
+    max_elapsed = 0
+    final_period = max(period_lengths)
+    game_finished = any(
+        int(play.get("period_number") or 0) == final_period and int(play.get("clock_seconds") or 0) == 0
+        for play in ordered_plays
+    )
+
+    for play in ordered_plays:
+        period_number = int(play.get("period_number") or 0)
+        if period_number <= 0 or period_number not in period_offsets:
+            continue
+        clock_seconds = max(int(play.get("clock_seconds") or 0), 0)
+        period_length = period_lengths[period_number]
+        elapsed = period_offsets[period_number] + max(period_length - min(clock_seconds, period_length), 0)
+        max_elapsed = max(max_elapsed, elapsed)
+
+        team_id = str(play.get("team_id") or "").strip()
+        athlete_id = str(play.get("athlete_id") or "").strip()
+        text_lower = str(play.get("text") or "").lower()
+        play_type = normalize_play_type(str(play.get("play_type") or play.get("type") or ""))
+        is_substitution = play_type == "substitution" or "subbing in" in text_lower or "subbing out" in text_lower
+
+        if is_substitution and team_id and athlete_id and "subbing out" in text_lower:
+            lineup = on_court.setdefault(team_id, set())
+            if athlete_id not in lineup:
+                lineup.add(athlete_id)
+                ensure_player(team_id, athlete_id)
+
+        last_elapsed = accrue_until(elapsed, last_elapsed)
+
+        if is_substitution and team_id and athlete_id:
+            lineup = on_court.setdefault(team_id, set())
+            ensure_player(team_id, athlete_id)
+            if "subbing out" in text_lower:
+                lineup.discard(athlete_id)
+            if "subbing in" in text_lower:
+                lineup.add(athlete_id)
+
+    game_end = sum(period_lengths[period_number] for period_number in sorted(period_lengths)) if game_finished else max_elapsed
+    accrue_until(game_end, last_elapsed)
+    return seconds_by_team
 
 
 @dataclass(frozen=True)
@@ -620,6 +726,7 @@ def derive_game_stats(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     team_totals: Dict[str, Dict[str, int]] = {}
     player_totals: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    stat_fields = tuple(stat_line().keys())
 
     def team_row(team_id: str) -> Dict[str, int]:
         if team_id not in team_totals:
@@ -723,12 +830,19 @@ def derive_game_stats(
             assister["assists"] += 1
             team_stats["assists"] += 1
 
-    return list(team_totals.items()), list(player_totals.values())
+    player_rows = [
+        row
+        for row in player_totals.values()
+        if any(int(row.get(field) or 0) for field in stat_fields)
+    ]
+
+    return list(team_totals.items()), player_rows
 
 
 def aggregate_rows(rows: Sequence[Dict[str, Any]], key_fields: Sequence[str]) -> List[Dict[str, Any]]:
     grouped: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     stat_fields = tuple(stat_line().keys())
+    sum_fields = (*stat_fields, "seconds_played")
     for row in rows:
         key = tuple(row[field] for field in key_fields)
         if key not in grouped:
@@ -740,10 +854,10 @@ def aggregate_rows(rows: Sequence[Dict[str, Any]], key_fields: Sequence[str]) ->
                 grouped[key]["player_name"] = row["player_name"]
             if "player_key" in row:
                 grouped[key]["player_key"] = row["player_key"]
-            for field in stat_fields:
+            for field in sum_fields:
                 grouped[key][field] = 0
         grouped[key]["games_played"] += int(row.get("games_played") or 0)
-        for field in stat_fields:
+        for field in sum_fields:
             grouped[key][field] += int(row.get(field) or 0)
     return list(grouped.values())
 
@@ -753,6 +867,7 @@ class BuildService:
         self.db = db
         self.object_store = object_store or LocalObjectStore()
         self._lock = threading.Lock()
+        self._starting_lineup_cache: Dict[str, Dict[str, Set[str]]] = {}
         self.db.migrate()
         self.recover_incomplete_jobs()
 
@@ -1125,12 +1240,109 @@ class BuildService:
                 for play in plays
             ],
         )
+        self._starting_lineup_cache.pop(game_id, None)
         return {
             "rows": len(plays),
             "source_url": archive_payload["source_url"],
             "archive_path": stored.path,
             "updated_at": now_iso(),
         }
+
+    def _stats_pbp_rows(self, game_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        target = game_id or self.default_game_id()
+        return self.db.fetch_all(
+            """
+            SELECT sequence_number, play_key, period_number, clock_seconds, team_id, athlete_id,
+                   assist_athlete_id, play_type, text, scoring_play, shooting_play, score_value,
+                   points_attempted
+            FROM pbp_plays
+            WHERE game_id = ?
+            ORDER BY sequence_number, play_key
+            """,
+            (target,),
+        )
+
+    def _starting_lineups_from_personnel_payload(
+        self,
+        payload: Dict[str, Any],
+        team_ids: Sequence[str],
+    ) -> Dict[str, Set[str]]:
+        lineups = {team_id: set() for team_id in team_ids}
+        play_personnel = payload.get("playPersonnel")
+        if not isinstance(play_personnel, list):
+            play_personnel = payload.get("items")
+        if not isinstance(play_personnel, list):
+            play_personnel = [payload]
+
+        for item in play_personnel:
+            if not isinstance(item, dict):
+                continue
+            item_team_ref = str((item.get("team") or {}).get("$ref") or "")
+            item_team_id = extract_ref_id(item_team_ref) if item_team_ref else ""
+            entries = item.get("entries") or []
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                whereabouts_name = str(((entry.get("whereabouts") or {}).get("name")) or "")
+                if whereabouts_name != "ROSTER_WHEREABOUTS_IN_PLAY":
+                    continue
+                entry_team_ref = str((entry.get("team") or {}).get("$ref") or "")
+                team_id = extract_ref_id(entry_team_ref) if entry_team_ref else item_team_id
+                athlete_ref = str((entry.get("athlete") or {}).get("$ref") or "")
+                athlete_id = extract_ref_id(athlete_ref) if athlete_ref else ""
+                if team_id and athlete_id:
+                    lineups.setdefault(team_id, set()).add(athlete_id)
+        return lineups
+
+    def starting_lineups_for_game(
+        self,
+        game_id: str,
+        plays: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, Set[str]]:
+        if game_id in self._starting_lineup_cache:
+            return {
+                team_id: set(lineup)
+                for team_id, lineup in self._starting_lineup_cache[game_id].items()
+            }
+
+        rows = list(plays) if plays is not None else self._stats_pbp_rows(game_id)
+        team_ids = sorted(
+            {str(row.get("team_id") or "").strip() for row in rows if str(row.get("team_id") or "").strip()}
+        )
+        lineups = {team_id: set() for team_id in team_ids}
+        earliest_play = self.db.fetch_one(
+            """
+            SELECT raw_payload
+            FROM pbp_plays
+            WHERE game_id = ?
+            ORDER BY sequence_number, play_key
+            LIMIT 1
+            """,
+            (game_id,),
+        )
+        if earliest_play and earliest_play.get("raw_payload"):
+            try:
+                raw_payload = json.loads(str(earliest_play["raw_payload"]))
+                personnel_ref = str(((raw_payload.get("personnel") or {}).get("$ref")) or "")
+                if personnel_ref:
+                    personnel_payload = request_json(personnel_ref)
+                    lineups = self._starting_lineups_from_personnel_payload(personnel_payload, team_ids)
+            except Exception:
+                lineups = {team_id: set() for team_id in team_ids}
+
+        self._starting_lineup_cache[game_id] = {
+            team_id: set(lineup)
+            for team_id, lineup in lineups.items()
+        }
+        return {team_id: set(lineup) for team_id, lineup in lineups.items()}
+
+    def player_seconds_for_game(self, game_id: str) -> Dict[str, Dict[str, int]]:
+        rows = self._stats_pbp_rows(game_id)
+        if not rows:
+            return {}
+        return compute_seconds_played_from_pbp(rows, self.starting_lineups_for_game(game_id, rows))
 
     def raw_pbp_rows(self, game_id: Optional[str] = None) -> List[Dict[str, Any]]:
         target = game_id or self.default_game_id()
@@ -1148,7 +1360,7 @@ class BuildService:
         return rows
 
     def derive_and_store_game_stats(self, game_id: str, force: bool = False) -> bool:
-        rows = self.raw_pbp_rows(game_id)
+        rows = self._stats_pbp_rows(game_id)
         if not rows:
             self.db.execute("DELETE FROM game_team_stats WHERE game_id = ?", (game_id,))
             self.db.execute("DELETE FROM game_player_stats WHERE game_id = ?", (game_id,))
@@ -1156,6 +1368,7 @@ class BuildService:
         team_ids = sorted({str(row["team_id"]) for row in rows if row.get("team_id")})
         athlete_names = {team_id: fetch_team_roster(team_id) for team_id in team_ids}
         team_rows, player_rows = derive_game_stats(rows, athlete_names)
+        seconds_by_team = compute_seconds_played_from_pbp(rows, self.starting_lineups_for_game(game_id, rows))
         if force:
             self.db.execute("DELETE FROM game_team_stats WHERE game_id = ?", (game_id,))
             self.db.execute("DELETE FROM game_player_stats WHERE game_id = ?", (game_id,))
@@ -1204,8 +1417,8 @@ class BuildService:
             INSERT INTO game_player_stats (
                 game_id, team_id, player_key, athlete_id, player_name, games_played, points, rebounds, assists,
                 turnovers, steals, blocks, personal_fouls, fgm, fga, fg3m, fg3a, ftm, fta,
-                layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips, seconds_played
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1236,6 +1449,7 @@ class BuildService:
                     row["mid_a"],
                     row["dunks"],
                     row["tips"],
+                    int(seconds_by_team.get(row["team_id"], {}).get(row["athlete_id"], 0)),
                 )
                 for row in player_rows
             ],
@@ -1258,8 +1472,8 @@ class BuildService:
             INSERT INTO season_player_stats (
                 season_id, season_type, team_id, player_key, athlete_id, player_name, games_played, points,
                 rebounds, assists, turnovers, steals, blocks, personal_fouls, fgm, fga, fg3m, fg3a,
-                ftm, fta, layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ftm, fta, layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips, seconds_played
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1291,6 +1505,7 @@ class BuildService:
                     row["mid_a"],
                     row["dunks"],
                     row["tips"],
+                    row["seconds_played"],
                 )
                 for row in aggregated_players
             ],
@@ -1419,9 +1634,11 @@ class BuildService:
         display_rows: List[Dict[str, str]] = []
         totals = stat_line()
         max_gp = 0
+        total_seconds_played = 0
         for row in rows:
             gp = int(row["games_played"] or 0)
             max_gp = max(max_gp, gp)
+            total_seconds_played += int(row.get("seconds_played") or 0)
             for key in totals:
                 totals[key] += int(row[key] or 0)
             display_rows.append(
@@ -1430,6 +1647,7 @@ class BuildService:
                     player_name=str(row["player_name"]),
                     games_played=gp,
                     games_started=0,
+                    seconds_played=int(row.get("seconds_played") or 0),
                     points=int(row["points"]),
                     rebounds=int(row["rebounds"]),
                     assists=int(row["assists"]),
@@ -1457,6 +1675,7 @@ class BuildService:
                 player_name="Team",
                 games_played=max_gp,
                 games_started=max_gp,
+                seconds_played=total_seconds_played,
                 points=totals["points"],
                 rebounds=totals["rebounds"],
                 assists=totals["assists"],
@@ -1567,6 +1786,9 @@ class LocalFirstService:
 
     def load_pbp_rows(self, game_id: str) -> List[Dict[str, Any]]:
         return self.build_service.raw_pbp_rows(game_id)
+
+    def player_seconds_for_game(self, game_id: str) -> Dict[str, Dict[str, int]]:
+        return self.build_service.player_seconds_for_game(game_id)
 
     def pbp_summary(self, game_id: str) -> Dict[str, Any]:
         latest = self.build_service.latest_pbp_metadata(game_id)

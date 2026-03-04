@@ -51,6 +51,99 @@ const UCSB_TEAM_ID = "2540";
 const PBP_TEAM_ID = "pbp";
 const HIDDEN_COLUMNS = new Set(["row_key"]);
 
+const SEASON_PER_GAME_COLUMNS = new Set([
+  "MIN", "PTS", "REB", "AST", "TO", "STL", "BLK", "PF",
+  "FGM", "FGA", "3PM", "3PA", "MIDR_M", "MIDR_A", "LAYUP_M", "LAYUP_A",
+  "DUNKS", "TIPS", "FTM", "FTA"
+]);
+
+function parseGpFromGpGs(gpGs) {
+  const match = String(gpGs || "").match(/^(\d+)-/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+const SKIP_COLOR_COLUMNS = new Set(["team_id", "Player", "GP-GS", "row_key"]);
+const INVERTED_COLUMNS = new Set(["TO", "PF"]);
+const PERCENTAGE_COLUMNS = new Set(["FG%", "3P%", "FT%", "MIDR%", "LAYUP%"]);
+const ATTEMPT_COLUMN_MAP = { "FG%": "FGA", "3P%": "3PA", "FT%": "FTA", "MIDR%": "MIDR_A", "LAYUP%": "LAYUP_A" };
+
+function getCellColor(column, liveValue, seasonValue, isInverted) {
+  if (seasonValue === 0 || seasonValue == null) return null;
+  let deviation = liveValue - seasonValue;
+  if (isInverted) deviation = -deviation;
+  const pctDeviation = deviation / Math.abs(seasonValue);
+  const clamped = Math.max(-0.5, Math.min(0.5, pctDeviation));
+  const t = clamped / 0.5;
+  if (t >= 0) {
+    const r = Math.round(255 - t * (255 - 144));
+    const g = Math.round(255 - t * (255 - 238));
+    const b = Math.round(255 - t * (255 - 144));
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  const absT = -t;
+  const r = 255;
+  const g = Math.round(255 - absT * (255 - 160));
+  const b = Math.round(255 - absT * (255 - 160));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function buildCellColorMap(row, seasonRow, columns) {
+  if (!seasonRow) return null;
+  const seasonGp = parseGpFromGpGs(seasonRow["GP-GS"]);
+  const liveMin = Number(String(row["MIN"] ?? "").replace(/,/g, "")) || 0;
+  const colorMap = {};
+
+  for (const col of columns) {
+    if (SKIP_COLOR_COLUMNS.has(col)) continue;
+
+    const isPct = PERCENTAGE_COLUMNS.has(col);
+    const isCounting = !isPct && col !== "GP-GS";
+
+    if (isCounting && liveMin < 3) continue;
+
+    if (isPct) {
+      const attemptCol = ATTEMPT_COLUMN_MAP[col];
+      if (attemptCol) {
+        const liveAttempts = Number(String(row[attemptCol] ?? "").replace(/,/g, "")) || 0;
+        if (liveAttempts === 0) continue;
+      }
+    }
+
+    const liveRaw = Number(String(row[col] ?? "").replace(/,/g, "").replace(/%/g, ""));
+    if (Number.isNaN(liveRaw)) continue;
+
+    let seasonVal;
+    if (isPct) {
+      seasonVal = Number(String(seasonRow[col] ?? "").replace(/,/g, "").replace(/%/g, ""));
+    } else {
+      const seasonTotal = Number(String(seasonRow[col] ?? "").replace(/,/g, ""));
+      if (Number.isNaN(seasonTotal) || !seasonGp) continue;
+      seasonVal = seasonTotal / seasonGp;
+    }
+    if (Number.isNaN(seasonVal)) continue;
+
+    const color = getCellColor(col, liveRaw, seasonVal, INVERTED_COLUMNS.has(col));
+    if (color) colorMap[col] = color;
+  }
+  return colorMap;
+}
+
+function convertSeasonRows(rows, columns, mode) {
+  if (mode === "totals") return rows;
+  return rows.map((row) => {
+    const gp = parseGpFromGpGs(row["GP-GS"]);
+    if (!gp) return row;
+    const converted = { ...row };
+    for (const col of columns) {
+      if (!SEASON_PER_GAME_COLUMNS.has(col)) continue;
+      const raw = Number(String(row[col] ?? "").replace(/,/g, ""));
+      if (Number.isNaN(raw)) continue;
+      converted[col] = (raw / gp).toFixed(1);
+    }
+    return converted;
+  });
+}
+
 const DEFAULT_TABLE_STATE = {
   filter: "",
   sortColumn: "",
@@ -144,7 +237,7 @@ function formatInsightErrorMessage(error) {
   return message;
 }
 
-function DataTable({ columns, rows, state, onChange, extraControls = null }) {
+function DataTable({ columns, rows, state, onChange, extraControls = null, cellColorFn = null, rowStyleFn = null }) {
   const rowRefs = useRef({});
 
   const sortedRows = useMemo(() => {
@@ -250,6 +343,7 @@ function DataTable({ columns, rows, state, onChange, extraControls = null }) {
                     }
                   }}
                   className={`${isSelected ? "selected" : ""} ${isHighlighted ? "highlighted" : ""}`.trim()}
+                  style={rowStyleFn ? rowStyleFn(row) : undefined}
                   onClick={() =>
                     onChange({
                       selectedRowKey: row.row_key || "",
@@ -257,9 +351,17 @@ function DataTable({ columns, rows, state, onChange, extraControls = null }) {
                     })
                   }
                 >
-                  {columns.map((column) => (
-                    <td key={`${rowKeyValue}_${column}`}>{row[column]}</td>
-                  ))}
+                  {columns.map((column) => {
+                    const cellColor = cellColorFn ? cellColorFn(row, column) : null;
+                    return (
+                      <td
+                        key={`${rowKeyValue}_${column}`}
+                        style={cellColor ? { backgroundColor: cellColor } : undefined}
+                      >
+                        {row[column]}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
@@ -325,6 +427,8 @@ export default function App() {
     ucsb: { ...DEFAULT_TABLE_STATE },
     opponent: { ...DEFAULT_TABLE_STATE }
   });
+
+  const [seasonStatMode, setSeasonStatMode] = useState("pergame");
 
   const [pbpData, setPbpData] = useState({ columns: [], rows: [], team_id: PBP_TEAM_ID, updated_at: "", source_url: "" });
   const [pbpGameId, setPbpGameId] = useState("401809115");
@@ -726,12 +830,66 @@ export default function App() {
   const opponentDisplayName = teamNameById[normalizedOpponentTeamId] || normalizedOpponentTeamId || "Opponent";
   const activeSeasonName = activeSeasonSide === "ucsb" ? ucsbDisplayName : opponentDisplayName;
   const activeLivePrefix = activeLiveSide === "ucsb" ? "ucsb" : "opponent";
+  const seasonDataByTeamId = useMemo(() => {
+    const map = {};
+    if (seasonPlayers.ucsb.rows.length) {
+      map[UCSB_TEAM_ID] = seasonPlayers.ucsb;
+    }
+    if (normalizedOpponentTeamId && seasonPlayers.opponent.rows.length) {
+      map[normalizedOpponentTeamId] = seasonPlayers.opponent;
+    }
+    return map;
+  }, [seasonPlayers, normalizedOpponentTeamId]);
+
   const activeSeasonPlayers = seasonPlayers[activeSeasonSide];
+  const activeSeasonDisplayRows = useMemo(
+    () => convertSeasonRows(activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode),
+    [activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode]
+  );
   const activeSeasonPlayersLoading = seasonPlayersLoading[activeSeasonSide];
   const activeSeasonPlayersError = seasonPlayersError[activeSeasonSide];
   const activeSeasonPlayersTableState = seasonPlayersTableState[activeSeasonSide];
   const livePlayersData = liveStats[`${activeLivePrefix}_players`] || { columns: [], rows: [] };
   const activeLivePlayersTableState = livePlayersTableState[activeLiveSide];
+
+  const liveColorCache = useMemo(() => {
+    const cache = new Map();
+    for (const row of livePlayersData.rows) {
+      const teamId = String(row.team_id || "").trim();
+      const playerName = String(row.Player || "").trim();
+      const seasonData = seasonDataByTeamId[teamId];
+      if (!seasonData || !seasonData.rows.length) {
+        cache.set(row, { noData: true });
+        continue;
+      }
+      const isTeamRow = playerName === "Team";
+      const seasonRow = seasonData.rows.find((sr) =>
+        isTeamRow
+          ? String(sr.Player || "").trim() === "Team"
+          : String(sr.Player || "").trim() === playerName
+      );
+      if (!seasonRow) {
+        cache.set(row, { noData: true });
+        continue;
+      }
+      const colorMap = buildCellColorMap(row, seasonRow, livePlayersData.columns);
+      cache.set(row, { noData: false, colors: colorMap || {} });
+    }
+    return cache;
+  }, [livePlayersData.rows, livePlayersData.columns, seasonDataByTeamId]);
+
+  const liveCellColorFn = useCallback((row, column) => {
+    const entry = liveColorCache.get(row);
+    if (!entry || entry.noData) return null;
+    return entry.colors[column] || null;
+  }, [liveColorCache]);
+
+  const liveRowStyleFn = useCallback((row) => {
+    const entry = liveColorCache.get(row);
+    if (entry && entry.noData) return { backgroundColor: "#f0f0f0" };
+    return null;
+  }, [liveColorCache]);
+
   const pbpCanApply = canApplyPbpAdvancedFilters(pbpAdvancedFiltersDraft);
   const pbpFiltersDirty = !pbpAdvancedFiltersEqual(pbpAdvancedFiltersDraft, pbpAppliedFilters);
   const pbpClockHint = useMemo(() => {
@@ -1070,7 +1228,7 @@ export default function App() {
             </div>
             <DataTable
               columns={activeSeasonPlayers.columns}
-              rows={activeSeasonPlayers.rows}
+              rows={activeSeasonDisplayRows}
               state={activeSeasonPlayersTableState}
               onChange={(patch) =>
                 setSeasonPlayersTableState((prev) => ({
@@ -1080,6 +1238,24 @@ export default function App() {
                     ...patch
                   }
                 }))
+              }
+              extraControls={
+                <div className="stat-mode-toggle">
+                  <button
+                    type="button"
+                    className={seasonStatMode === "totals" ? "active" : ""}
+                    onClick={() => setSeasonStatMode("totals")}
+                  >
+                    Totals
+                  </button>
+                  <button
+                    type="button"
+                    className={seasonStatMode === "pergame" ? "active" : ""}
+                    onClick={() => setSeasonStatMode("pergame")}
+                  >
+                    Per Game
+                  </button>
+                </div>
               }
             />
               </>
@@ -1195,6 +1371,8 @@ export default function App() {
                       }
                     }))
                   }
+                  cellColorFn={liveCellColorFn}
+                  rowStyleFn={liveRowStyleFn}
                 />
               </>
             ) : (

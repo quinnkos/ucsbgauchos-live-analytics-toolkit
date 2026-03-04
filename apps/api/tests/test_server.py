@@ -404,12 +404,44 @@ class LiveStatsRegressionTests(unittest.TestCase):
             },
         ]
         with patch("apps.api.server.load_pbp_rows", return_value=raw_rows):
-            live = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300")
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.player_seconds_for_game.return_value = {
+                    "2540": {"11": 600, "22": 600},
+                    "300": {"44": 600},
+                }
+                live = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300")
         ucsb_rows = live["ucsb_team"]["rows"]
         pts_row = next(row for row in ucsb_rows if row["stat_key"] == "pts")
         ast_row = next(row for row in ucsb_rows if row["stat_key"] == "ast")
         self.assertEqual(pts_row["value"], "2")
         self.assertEqual(ast_row["value"], "1")
+
+    def test_live_player_rows_include_minutes_played(self) -> None:
+        raw_rows = [
+            {
+                "team_id": "2540",
+                "type": "Made Shot",
+                "text": "Made Jumper",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 2,
+                "points_attempted": 2,
+                "athlete_id": "11",
+                "assist_athlete_id": "22",
+            }
+        ]
+        with patch("apps.api.server.load_pbp_rows", return_value=raw_rows):
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.player_seconds_for_game.return_value = {
+                    "2540": {"11": 600, "22": 1200}
+                }
+                with patch("apps.api.server.resolve_athlete_name", side_effect=lambda athlete_id: f"Player {athlete_id}"):
+                    live = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300")
+        player_rows = live["ucsb_players"]["rows"]
+        minutes_by_player = {row["Player"]: row["MIN"] for row in player_rows}
+        self.assertEqual(minutes_by_player["Player 11"], "10.0")
+        self.assertEqual(minutes_by_player["Player 22"], "20.0")
+        self.assertEqual(minutes_by_player["Team"], "30.0")
 
 
 class PbpAdvancedFilterTests(unittest.TestCase):
