@@ -67,30 +67,51 @@ const INVERTED_COLUMNS = new Set(["TO", "PF"]);
 const PERCENTAGE_COLUMNS = new Set(["FG%", "3P%", "FT%", "MIDR%", "LAYUP%"]);
 const ATTEMPT_COLUMN_MAP = { "FG%": "FGA", "3P%": "3PA", "FT%": "FTA", "MIDR%": "MIDR_A", "LAYUP%": "LAYUP_A" };
 
-function getCellColor(column, liveValue, seasonValue, isInverted) {
+function getCellColor(
+  liveValue,
+  seasonValue,
+  { isInverted = false, isPct = false, startPctDeviation = 0.5, capPctDeviation = 1.0 } = {}
+) {
   if (seasonValue === 0 || seasonValue == null) return null;
   let deviation = liveValue - seasonValue;
   if (isInverted) deviation = -deviation;
   const pctDeviation = deviation / Math.abs(seasonValue);
-  const clamped = Math.max(-0.5, Math.min(0.5, pctDeviation));
-  const t = clamped / 0.5;
-  if (t >= 0) {
+
+  if (!isPct && pctDeviation < 0) {
+    return null;
+  }
+
+  const absPctDeviation = Math.abs(pctDeviation);
+  if (absPctDeviation < startPctDeviation) {
+    return null;
+  }
+
+  const safeCapPctDeviation = capPctDeviation > startPctDeviation ? capPctDeviation : startPctDeviation + 1e-6;
+  const t = Math.max(
+    0,
+    Math.min(1, (absPctDeviation - startPctDeviation) / (safeCapPctDeviation - startPctDeviation))
+  );
+
+  if (pctDeviation >= 0) {
     const r = Math.round(255 - t * (255 - 144));
     const g = Math.round(255 - t * (255 - 238));
     const b = Math.round(255 - t * (255 - 144));
     return `rgb(${r}, ${g}, ${b})`;
   }
-  const absT = -t;
   const r = 255;
-  const g = Math.round(255 - absT * (255 - 160));
-  const b = Math.round(255 - absT * (255 - 160));
+  const g = Math.round(255 - t * (255 - 160));
+  const b = Math.round(255 - t * (255 - 160));
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function buildCellColorMap(row, seasonRow, columns) {
+function buildCellColorMap(row, seasonRow, columns, colorConfig = {}) {
   if (!seasonRow) return null;
   const seasonGp = parseGpFromGpGs(seasonRow["GP-GS"]);
   const liveMin = Number(String(row["MIN"] ?? "").replace(/,/g, "")) || 0;
+  const minPctColorAttemptsRaw = Number(colorConfig.minPctColorAttempts);
+  const minPctColorAttempts = Number.isFinite(minPctColorAttemptsRaw)
+    ? Math.max(0, minPctColorAttemptsRaw)
+    : 0;
   const colorMap = {};
 
   for (const col of columns) {
@@ -105,7 +126,7 @@ function buildCellColorMap(row, seasonRow, columns) {
       const attemptCol = ATTEMPT_COLUMN_MAP[col];
       if (attemptCol) {
         const liveAttempts = Number(String(row[attemptCol] ?? "").replace(/,/g, "")) || 0;
-        if (liveAttempts === 0) continue;
+        if (liveAttempts < minPctColorAttempts) continue;
       }
     }
 
@@ -122,7 +143,11 @@ function buildCellColorMap(row, seasonRow, columns) {
     }
     if (Number.isNaN(seasonVal)) continue;
 
-    const color = getCellColor(col, liveRaw, seasonVal, INVERTED_COLUMNS.has(col));
+    const color = getCellColor(liveRaw, seasonVal, {
+      isInverted: INVERTED_COLUMNS.has(col),
+      isPct,
+      ...colorConfig
+    });
     if (color) colorMap[col] = color;
   }
   return colorMap;
@@ -454,6 +479,9 @@ export default function App() {
     ucsb: { ...DEFAULT_TABLE_STATE },
     opponent: { ...DEFAULT_TABLE_STATE }
   });
+  const [liveColorStartPctDeviation, setLiveColorStartPctDeviation] = useState(0.5);
+  const [liveColorCapPctDeviation, setLiveColorCapPctDeviation] = useState(1.0);
+  const [minPctColorAttempts, setMinPctColorAttempts] = useState(5);
 
   const [prompt, setPrompt] = useState("");
   const [contextEnabled, setContextEnabled] = useState({
@@ -851,6 +879,42 @@ export default function App() {
   const activeSeasonPlayersTableState = seasonPlayersTableState[activeSeasonSide];
   const livePlayersData = liveStats[`${activeLivePrefix}_players`] || { columns: [], rows: [] };
   const activeLivePlayersTableState = livePlayersTableState[activeLiveSide];
+  const liveColorCapMin = useMemo(
+    () => Math.min(2, Math.max(0.5, Number((liveColorStartPctDeviation + 0.05).toFixed(2)))),
+    [liveColorStartPctDeviation]
+  );
+  const liveColorConfig = useMemo(
+    () => ({
+      startPctDeviation: liveColorStartPctDeviation,
+      capPctDeviation: liveColorCapPctDeviation,
+      minPctColorAttempts
+    }),
+    [liveColorStartPctDeviation, liveColorCapPctDeviation, minPctColorAttempts]
+  );
+
+  useEffect(() => {
+    if (liveColorCapPctDeviation < liveColorCapMin) {
+      setLiveColorCapPctDeviation(liveColorCapMin);
+    }
+  }, [liveColorCapPctDeviation, liveColorCapMin]);
+
+  const handleLiveColorStartChange = useCallback((event) => {
+    const nextStart = Number.parseFloat(event.target.value);
+    if (Number.isNaN(nextStart)) return;
+    setLiveColorStartPctDeviation(nextStart);
+  }, []);
+
+  const handleLiveColorCapChange = useCallback((event) => {
+    const nextCap = Number.parseFloat(event.target.value);
+    if (Number.isNaN(nextCap)) return;
+    setLiveColorCapPctDeviation(nextCap);
+  }, []);
+
+  const handleMinPctColorAttemptsChange = useCallback((event) => {
+    const nextValue = Number.parseInt(event.target.value, 10);
+    if (Number.isNaN(nextValue)) return;
+    setMinPctColorAttempts(Math.max(0, nextValue));
+  }, []);
 
   const liveColorCache = useMemo(() => {
     const cache = new Map();
@@ -872,11 +936,11 @@ export default function App() {
         cache.set(row, { noData: true });
         continue;
       }
-      const colorMap = buildCellColorMap(row, seasonRow, livePlayersData.columns);
+      const colorMap = buildCellColorMap(row, seasonRow, livePlayersData.columns, liveColorConfig);
       cache.set(row, { noData: false, colors: colorMap || {} });
     }
     return cache;
-  }, [livePlayersData.rows, livePlayersData.columns, seasonDataByTeamId]);
+  }, [livePlayersData.rows, livePlayersData.columns, seasonDataByTeamId, liveColorConfig]);
 
   const liveCellColorFn = useCallback((row, column) => {
     const entry = liveColorCache.get(row);
@@ -1373,6 +1437,46 @@ export default function App() {
                   }
                   cellColorFn={liveCellColorFn}
                   rowStyleFn={liveRowStyleFn}
+                  extraControls={
+                    <div className="live-color-controls">
+                      <label>
+                        <span className="control-label">
+                          Color start (pct dev) <strong className="control-value">{liveColorStartPctDeviation.toFixed(2)}</strong>
+                        </span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={liveColorStartPctDeviation}
+                          onChange={handleLiveColorStartChange}
+                        />
+                      </label>
+                      <label>
+                        <span className="control-label">
+                          Color cap (pct dev) <strong className="control-value">{liveColorCapPctDeviation.toFixed(2)}</strong>
+                        </span>
+                        <input
+                          type="range"
+                          min={liveColorCapMin}
+                          max="2"
+                          step="0.05"
+                          value={liveColorCapPctDeviation}
+                          onChange={handleLiveColorCapChange}
+                        />
+                      </label>
+                      <label>
+                        <span className="control-label">Min attempts for % color</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={minPctColorAttempts}
+                          onChange={handleMinPctColorAttemptsChange}
+                        />
+                      </label>
+                    </div>
+                  }
                 />
               </>
             ) : (

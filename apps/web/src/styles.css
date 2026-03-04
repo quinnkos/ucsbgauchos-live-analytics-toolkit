@@ -399,6 +399,37 @@ textarea {
   margin-bottom: 8px;
 }
 
+.live-color-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: flex-end;
+}
+
+.live-color-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.live-color-controls .control-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.live-color-controls .control-value {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-color-controls input[type="range"] {
+  width: 150px;
+  padding: 0;
+}
+
 .pbp-advanced-filters {
   display: flex;
   flex-wrap: wrap;
