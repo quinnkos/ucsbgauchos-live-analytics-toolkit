@@ -1,0 +1,226 @@
+{
+  "season_id": "2025-2026",
+  "season_type": "regular",
+  "team_id": "2540",
+  "team_name": "UC Santa Barbara Gauchos",
+  "source_url": "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/2540/schedule?season=2026&seasontype=2",
+  "games": [
+    {
+      "game_id": "401830409",
+      "date": "2025-11-05",
+      "opponent_team_id": "22",
+      "opponent_name": "San Francisco State Gators",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401829324",
+      "date": "2025-11-08",
+      "opponent_team_id": "23",
+      "opponent_name": "San José State Spartans",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401826928",
+      "date": "2025-11-12",
+      "opponent_team_id": "16",
+      "opponent_name": "Sacramento State Hornets",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401824041",
+      "date": "2025-11-18",
+      "opponent_team_id": "2351",
+      "opponent_name": "Loyola Marymount Lions",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401829291",
+      "date": "2025-11-22",
+      "opponent_team_id": "2440",
+      "opponent_name": "Nevada Wolf Pack",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401830410",
+      "date": "2025-11-25",
+      "opponent_team_id": "130201",
+      "opponent_name": "Nobel Knights",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401829415",
+      "date": "2025-11-28",
+      "opponent_team_id": "2329",
+      "opponent_name": "Lehigh Mountain Hawks",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401831226",
+      "date": "2025-11-29",
+      "opponent_team_id": "2547",
+      "opponent_name": "Seattle U Redhawks",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401823311",
+      "date": "2025-12-05",
+      "opponent_team_id": "299",
+      "opponent_name": "Long Beach State Beach",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401823737",
+      "date": "2025-12-07",
+      "opponent_team_id": "2934",
+      "opponent_name": "Cal State Bakersfield Roadrunners",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401826952",
+      "date": "2025-12-13",
+      "opponent_team_id": "3084",
+      "opponent_name": "Utah Valley Wolverines",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401828479",
+      "date": "2025-12-18",
+      "opponent_team_id": "2739",
+      "opponent_name": "Green Bay Phoenix",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401824094",
+      "date": "2025-12-22",
+      "opponent_team_id": "2501",
+      "opponent_name": "Portland Pilots",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401823177",
+      "date": "2026-01-02",
+      "opponent_team_id": "2239",
+      "opponent_name": "Cal State Fullerton Titans",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401823265",
+      "date": "2026-01-03",
+      "opponent_team_id": "2463",
+      "opponent_name": "Cal State Northridge Matadors",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809126",
+      "date": "2026-01-09",
+      "opponent_team_id": "302",
+      "opponent_name": "UC Davis Aggies",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401823742",
+      "date": "2026-01-16",
+      "opponent_team_id": "2934",
+      "opponent_name": "Cal State Bakersfield Roadrunners",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809142",
+      "date": "2026-01-18",
+      "opponent_team_id": "62",
+      "opponent_name": "Hawai'i Rainbow Warriors",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401809157",
+      "date": "2026-01-23",
+      "opponent_team_id": "13",
+      "opponent_name": "Cal Poly Mustangs",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401823337",
+      "date": "2026-01-25",
+      "opponent_team_id": "299",
+      "opponent_name": "Long Beach State Beach",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809094",
+      "date": "2026-01-30",
+      "opponent_team_id": "28",
+      "opponent_name": "UC San Diego Tritons",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401823181",
+      "date": "2026-02-01",
+      "opponent_team_id": "2239",
+      "opponent_name": "Cal State Fullerton Titans",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401809132",
+      "date": "2026-02-06",
+      "opponent_team_id": "302",
+      "opponent_name": "UC Davis Aggies",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809115",
+      "date": "2026-02-08",
+      "opponent_team_id": "300",
+      "opponent_name": "UC Irvine Anteaters",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401826048",
+      "date": "2026-02-13",
+      "opponent_team_id": "27",
+      "opponent_name": "UC Riverside Highlanders",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809162",
+      "date": "2026-02-15",
+      "opponent_team_id": "13",
+      "opponent_name": "Cal Poly Mustangs",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401823268",
+      "date": "2026-02-20",
+      "opponent_team_id": "2463",
+      "opponent_name": "Cal State Northridge Matadors",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401809149",
+      "date": "2026-02-22",
+      "opponent_team_id": "62",
+      "opponent_name": "Hawai'i Rainbow Warriors",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401826049",
+      "date": "2026-02-27",
+      "opponent_team_id": "27",
+      "opponent_name": "UC Riverside Highlanders",
+      "home_away": "home"
+    },
+    {
+      "game_id": "401809120",
+      "date": "2026-03-01",
+      "opponent_team_id": "300",
+      "opponent_name": "UC Irvine Anteaters",
+      "home_away": "away"
+    },
+    {
+      "game_id": "401809104",
+      "date": "2026-03-08",
+      "opponent_team_id": "28",
+      "opponent_name": "UC San Diego Tritons",
+      "home_away": "home"
+    }
+  ]
+}

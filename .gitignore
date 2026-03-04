@@ -12,5 +12,13 @@ apps/web/node_modules/
 # Build outputs
 apps/web/dist/
 
+# Local docs
+docs/
+
 # Local env
 .env
+
+# Local runtime artifacts
+var/
+data/
+*.sqlite3

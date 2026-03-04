@@ -1,0 +1,15 @@
+{
+  "default_season_id": "2025-2026",
+  "default_season_type": "regular",
+  "seasons": [
+    {
+      "season_id": "2025-2026",
+      "season_type": "regular",
+      "label": "2025-2026 Regular Season",
+      "locked": true
+    }
+  ],
+  "root_team_id": "2540",
+  "root_team_name": "UC Santa Barbara Gauchos",
+  "scope_note": "Supported teams are UCSB and opponents on UCSB's 2025-2026 regular-season schedule only."
+}

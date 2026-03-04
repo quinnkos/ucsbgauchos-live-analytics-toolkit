@@ -15,8 +15,16 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from .local_first import (
+    PLAYER_TABLE_COLUMNS,
+    ROOT_TEAM_ID,
+    field_goal_breakdown_metrics,
+    get_service,
+    player_display_row,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_ROOT = REPO_ROOT / "data"
+DATA_ROOT = REPO_ROOT / "var" / "legacy_runtime"
 
 SEASON_LABEL = "2025-26"
 SCHEMA_VERSION = "espn-season-v1"
@@ -1279,18 +1287,8 @@ def _build_pbp_display_rows(
 
 
 def load_pbp_rows(game_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    path = pbp_data_path(game_id=game_id)
-    if not path.exists():
-        raise RuntimeError("PBP data not found. Click Update in the PBP panel to fetch ESPN data.")
-
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise RuntimeError("PBP data is invalid: expected a JSON array of rows.")
-
-    rows = [row for row in payload if isinstance(row, dict)]
-    if not rows:
-        raise RuntimeError("PBP data file is empty. Click Update in the PBP panel to fetch ESPN data.")
-    return rows
+    gid = (game_id or ESPN_PBP_GAME_ID).strip()
+    return get_service().load_pbp_rows(gid)
 
 
 def build_pbp_context(team_id: str = "pbp", game_id: Optional[str] = None) -> Dict[str, Any]:
@@ -1314,8 +1312,8 @@ def build_pbp_context_filtered(
         normalized_rows.append({**row, "row_key": row_key})
     display_columns, display_rows = _build_pbp_display_rows(normalized_rows, columns + ["row_key"])
 
-    path = pbp_data_path(game_id=gid)
-    updated_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat() if path.exists() else now_iso()
+    summary = get_service().pbp_summary(gid)
+    updated_at = summary.get("updated_at") or now_iso()
 
     return {
         "team_id": normalize_team_id(team_id),
@@ -1324,7 +1322,7 @@ def build_pbp_context_filtered(
         "rows": display_rows,
         "rows_by_key": {row["row_key"]: row for row in display_rows},
         "updated_at": updated_at,
-        "source_url": espn_pbp_source_url(ESPN_PBP_LEAGUE, gid),
+        "source_url": summary.get("source_url") or espn_pbp_source_url(ESPN_PBP_LEAGUE, gid),
         "schema_version": PBP_SCHEMA_VERSION,
     }
 
@@ -1335,8 +1333,7 @@ LIVE_TEAM_COLUMNS = [
     "numeric_value", "display_value", "rank", "abbreviation",
 ]
 LIVE_PLAYER_COLUMNS = [
-    "row_key", "team_id", "Player", "GP", "MIN", "PTS", "REB", "AST",
-    "STL", "BLK", "TO", "FG_PCT", "FG3_PCT", "FT_PCT", "PF",
+    "team_id", *PLAYER_TABLE_COLUMNS,
 ]
 
 
@@ -1425,6 +1422,14 @@ def _compute_live_player_stats(team_plays: List[Dict[str, Any]]) -> Dict[str, Di
                 "3pa": 0,
                 "ftm": 0,
                 "fta": 0,
+                "midr_m": 0,
+                "midr_a": 0,
+                "layup_m": 0,
+                "layup_a": 0,
+                "dunk_m": 0,
+                "dunk_a": 0,
+                "dunks": 0,
+                "tips": 0,
             }
         return stats_by_athlete[aid]
 
@@ -1456,6 +1461,22 @@ def _compute_live_player_stats(team_plays: List[Dict[str, Any]]) -> Dict[str, Di
                     athlete_stats["2pm"] += 1
                 else:
                     athlete_stats["3pm"] += 1
+
+            if play_type == "JumpShot" and points_attempted == 2:
+                athlete_stats["midr_a"] += 1
+                if scoring_play:
+                    athlete_stats["midr_m"] += 1
+            elif play_type == "LayUpShot" and points_attempted == 2:
+                athlete_stats["layup_a"] += 1
+                if scoring_play:
+                    athlete_stats["layup_m"] += 1
+            elif play_type == "DunkShot":
+                athlete_stats["dunk_a"] += 1
+                if scoring_play:
+                    athlete_stats["dunk_m"] += 1
+                athlete_stats["dunks"] += 1
+            elif play_type == "TipShot":
+                athlete_stats["tips"] += 1
 
             if _is_free_throw_text(text):
                 athlete_stats["fta"] += 1
@@ -1494,6 +1515,14 @@ def _compute_live_team_stats(team_plays: List[Dict[str, Any]]) -> Dict[str, int]
         "3pa": 0,
         "ftm": 0,
         "fta": 0,
+        "midr_m": 0,
+        "midr_a": 0,
+        "layup_m": 0,
+        "layup_a": 0,
+        "dunk_m": 0,
+        "dunk_a": 0,
+        "dunks": 0,
+        "tips": 0,
         "oreb": 0,
         "dreb": 0,
         "ast": 0,
@@ -1527,6 +1556,22 @@ def _compute_live_team_stats(team_plays: List[Dict[str, Any]]) -> Dict[str, int]
                 totals["2pm"] += 1
             else:
                 totals["3pm"] += 1
+
+        if play_type == "JumpShot" and points_attempted == 2:
+            totals["midr_a"] += 1
+            if scoring_play:
+                totals["midr_m"] += 1
+        elif play_type == "LayUpShot" and points_attempted == 2:
+            totals["layup_a"] += 1
+            if scoring_play:
+                totals["layup_m"] += 1
+        elif play_type == "DunkShot":
+            totals["dunk_a"] += 1
+            if scoring_play:
+                totals["dunk_m"] += 1
+            totals["dunks"] += 1
+        elif play_type == "TipShot":
+            totals["tips"] += 1
 
         if _is_free_throw_text(text):
             totals["fta"] += 1
@@ -1588,9 +1633,25 @@ def _live_team_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
     add_stat("3pm", "3PM", totals["3pm"], str(totals["3pm"]))
     add_stat("3pa", "3PA", totals["3pa"], str(totals["3pa"]))
     add_stat("3p_pct", "3P%", fg3_pct, fg3_pct)
+    add_stat("dunks", "DUNKS", totals["dunks"], str(totals["dunks"]))
+    add_stat("tips", "TIPS", totals["tips"], str(totals["tips"]))
     add_stat("ftm", "FTM", totals["ftm"], str(totals["ftm"]))
     add_stat("fta", "FTA", totals["fta"], str(totals["fta"]))
     add_stat("ft_pct", "FT%", ft_pct, ft_pct)
+    for stat_key, stat_name, display_value in field_goal_breakdown_metrics(
+        fgm=totals["fgm"],
+        fga=totals["fga"],
+        fg3m=totals["3pm"],
+        fg3a=totals["3pa"],
+        mid_m=totals["midr_m"],
+        mid_a=totals["midr_a"],
+        layup_m=totals["layup_m"],
+        layup_a=totals["layup_a"],
+        dunk_m=totals["dunk_m"],
+        dunk_a=totals["dunk_a"],
+        tips=totals["tips"],
+    ):
+        add_stat(stat_key, stat_name, display_value, display_value)
     add_stat("oreb", "Offensive Rebounds", totals["oreb"], str(totals["oreb"]))
     add_stat("dreb", "Defensive Rebounds", totals["dreb"], str(totals["dreb"]))
     add_stat("reb", "Rebounds", reb, str(reb))
@@ -1617,6 +1678,27 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
             all_athletes.add(assist_id)
     seen: Dict[str, int] = {}
     out: List[Dict[str, Any]] = []
+    totals = {
+        "pts": 0,
+        "reb": 0,
+        "ast": 0,
+        "to": 0,
+        "stl": 0,
+        "blk": 0,
+        "pf": 0,
+        "fgm": 0,
+        "fga": 0,
+        "fg3m": 0,
+        "fg3a": 0,
+        "ftm": 0,
+        "fta": 0,
+        "midr_m": 0,
+        "midr_a": 0,
+        "layup_m": 0,
+        "layup_a": 0,
+        "dunks": 0,
+        "tips": 0,
+    }
     for aid in sorted(all_athletes):
         stats = stats_by_athlete.get(aid, {})
         pts = int(stats.get("pts", 0))
@@ -1632,24 +1714,92 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
         fg3a = int(stats.get("3pa", 0))
         ftm = int(stats.get("ftm", 0))
         fta = int(stats.get("fta", 0))
+        midr_m = int(stats.get("midr_m", 0))
+        midr_a = int(stats.get("midr_a", 0))
+        layup_m = int(stats.get("layup_m", 0))
+        layup_a = int(stats.get("layup_a", 0))
+        dunks = int(stats.get("dunks", 0))
+        tips = int(stats.get("tips", 0))
+        totals["pts"] += pts
+        totals["reb"] += reb
+        totals["ast"] += ast
+        totals["to"] += to
+        totals["stl"] += stl
+        totals["blk"] += blk
+        totals["pf"] += pf
+        totals["fgm"] += fgm
+        totals["fga"] += fga
+        totals["fg3m"] += fg3m
+        totals["fg3a"] += fg3a
+        totals["ftm"] += ftm
+        totals["fta"] += fta
+        totals["midr_m"] += midr_m
+        totals["midr_a"] += midr_a
+        totals["layup_m"] += layup_m
+        totals["layup_a"] += layup_a
+        totals["dunks"] += dunks
+        totals["tips"] += tips
         rk = unique_row_key(f"live_{tid}_player_{aid}", seen)
-        out.append({
-            "row_key": rk,
+        out.append(
+            {
+                "team_id": tid,
+                **player_display_row(
+                    row_key=rk,
+                    player_name=resolve_athlete_name(aid),
+                    games_played=1,
+                    games_started=0,
+                    points=pts,
+                    rebounds=reb,
+                    assists=ast,
+                    turnovers=to,
+                    steals=stl,
+                    blocks=blk,
+                    personal_fouls=pf,
+                    ftm=ftm,
+                    fta=fta,
+                    fgm=fgm,
+                    fga=fga,
+                    fg3m=fg3m,
+                    fg3a=fg3a,
+                    mid_m=midr_m,
+                    mid_a=midr_a,
+                    layup_m=layup_m,
+                    layup_a=layup_a,
+                    dunks=dunks,
+                    tips=tips,
+                ),
+            }
+        )
+    out.append(
+        {
             "team_id": tid,
-            "Player": resolve_athlete_name(aid),
-            "GP": "1",
-            "MIN": "",
-            "PTS": str(pts),
-            "REB": str(reb),
-            "AST": str(ast),
-            "STL": str(stl),
-            "BLK": str(blk),
-            "TO": str(to),
-            "FG_PCT": _format_pct(fgm, fga),
-            "FG3_PCT": _format_pct(fg3m, fg3a),
-            "FT_PCT": _format_pct(ftm, fta),
-            "PF": str(pf),
-        })
+            **player_display_row(
+                row_key=unique_row_key(f"live_{tid}_player_team", seen),
+                player_name="Team",
+                games_played=1,
+                games_started=1,
+                points=totals["pts"],
+                rebounds=totals["reb"],
+                assists=totals["ast"],
+                turnovers=totals["to"],
+                steals=totals["stl"],
+                blocks=totals["blk"],
+                personal_fouls=totals["pf"],
+                ftm=totals["ftm"],
+                fta=totals["fta"],
+                fgm=totals["fgm"],
+                fga=totals["fga"],
+                fg3m=totals["fg3m"],
+                fg3a=totals["fg3a"],
+                mid_m=totals["midr_m"],
+                mid_a=totals["midr_a"],
+                layup_m=totals["layup_m"],
+                layup_a=totals["layup_a"],
+                dunks=totals["dunks"],
+                tips=totals["tips"],
+            ),
+        }
+    )
     return out
 
 
@@ -1706,20 +1856,17 @@ def update_pbp_data(force: bool = False, game_id: Optional[str] = None) -> Dict[
                 f"PBP update is rate-limited. Try again in {PBP_UPDATE_MIN_INTERVAL_SECONDS - elapsed:.1f}s."
             )
 
-    rows = fetch_espn_pbp_rows(league=ESPN_PBP_LEAGUE, game_id=gid)
-    if not rows:
-        raise RuntimeError("No play-by-play rows returned from ESPN.")
-
-    path = pbp_data_path(game_id=gid)
-    write_json_file(path, rows)
+    summary = get_service().ingest_game(gid, force=force)
+    get_service().derive_game_stats(gid)
+    get_service().aggregate_season()
     _LAST_PBP_UPDATE_AT = time.time()
 
     return {
-        "rows": len(rows),
-        "columns": pbp_columns(rows),
-        "source_url": espn_pbp_source_url(ESPN_PBP_LEAGUE, gid),
-        "file": str(path.relative_to(REPO_ROOT)),
-        "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        "rows": summary.get("rows", 0),
+        "columns": pbp_columns(load_pbp_rows(gid)),
+        "source_url": summary.get("source_url") or espn_pbp_source_url(ESPN_PBP_LEAGUE, gid),
+        "file": summary.get("archive_path", ""),
+        "updated_at": summary.get("updated_at", now_iso()),
         "schema_version": PBP_SCHEMA_VERSION,
     }
 
@@ -1772,85 +1919,9 @@ def _discover_season_ref(league_root: Dict[str, Any], target_year: int) -> str:
 
 
 def fetch_espn_teams(force_refresh: bool = False) -> Dict[str, Any]:
-    cache_path = espn_teams_cache_path()
-    if not force_refresh:
-        cached = read_json_file(cache_path)
-        if cached and isinstance(cached.get("teams"), list) and cached.get("teams"):
-            return cached
-
-    target_year = season_year_from_label(SEASON_LABEL)
-    try:
-        league_root = fetch_json(ESPN_LEAGUE_ROOT_URL)
-        season_ref = _discover_season_ref(league_root, target_year)
-        season_payload = fetch_json(season_ref)
-
-        teams_ref = ((season_payload.get("teams") or {}).get("$ref") if isinstance(season_payload, dict) else None) or ""
-        if not teams_ref:
-            teams_ref = ((league_root.get("teams") or {}).get("$ref") if isinstance(league_root, dict) else None) or ""
-        if not teams_ref:
-            raise RuntimeError("Could not discover teams $ref from ESPN league/season payload")
-
-        teams_payload = fetch_json(teams_ref)
-        team_refs = _items_to_refs(teams_payload.get("items"))
-        teams: List[Dict[str, str]] = []
-        seen_ids: Set[str] = set()
-        for team_ref in team_refs:
-            try:
-                team_payload = fetch_json(team_ref)
-            except Exception:
-                continue
-
-            team_id = to_text(team_payload.get("id") or _extract_ref_id(team_ref))
-            if not team_id or team_id in seen_ids:
-                continue
-            seen_ids.add(team_id)
-
-            school_name = to_text(
-                team_payload.get("displayName")
-                or team_payload.get("shortDisplayName")
-                or team_payload.get("name")
-                or team_id
-            )
-            teams.append(
-                {
-                    "team_id": team_id,
-                    "school_name": school_name,
-                    "abbreviation": to_text(team_payload.get("abbreviation")),
-                    "team_ref": team_ref,
-                }
-            )
-
-        if not teams:
-            raise RuntimeError("ESPN team list was empty")
-
-        teams.sort(key=lambda item: (item.get("school_name", ""), item.get("team_id", "")))
-        payload = {
-            "season": SEASON_LABEL,
-            "season_year": target_year,
-            "league": ESPN_LEAGUE,
-            "source_url": teams_ref,
-            "last_updated": now_iso(),
-            "teams": teams,
-        }
-        write_json_file(cache_path, payload)
-        return payload
-    except Exception as exc:  # noqa: BLE001
-        cached = read_json_file(cache_path)
-        if cached and isinstance(cached.get("teams"), list) and cached.get("teams"):
-            cached["warning"] = f"Using cached ESPN teams due to fetch error: {exc}"
-            return cached
-
-        payload = {
-            "season": SEASON_LABEL,
-            "season_year": target_year,
-            "league": ESPN_LEAGUE,
-            "source_url": ESPN_LEAGUE_ROOT_URL,
-            "last_updated": now_iso(),
-            "warning": f"Using built-in fallback teams due to ESPN fetch error: {exc}",
-            "teams": DEFAULT_ESPN_TEAMS,
-        }
-        write_json_file(cache_path, payload)
-        return payload
+    service = get_service()
+    service.verify_and_persist_schedule(force=False)
+    return service.supported_teams_payload(force_refresh=force_refresh)
 
 
 def _expand_ref_collection(ref_url: str, max_items: int = 500) -> List[Dict[str, Any]]:
@@ -2346,40 +2417,29 @@ def build_dataset_context(team_id: str, dataset: str) -> Dict[str, Any]:
         return build_pbp_context(team_id or "pbp")
 
     team_id = normalize_team_id(team_id)
-    pdf_context = build_dataset_context_from_pdf(team_id, canonical_dataset)
-    if pdf_context is not None:
-        _apply_player_column_config(pdf_context)
-        return pdf_context
+    service = get_service()
 
-    ensure_team_data(team_id)
+    if canonical_dataset == "players":
+        payload = service.player_dataset(team_id)
+        return {
+            "team_id": team_id,
+            "dataset": canonical_dataset,
+            "columns": payload["columns"],
+            "rows": payload["rows"],
+            "rows_by_key": {row.get("row_key", ""): row for row in payload["rows"]},
+        }
 
-    path = team_data_dir(team_id) / dataset_filename(canonical_dataset)
-    columns, rows = read_csv(path)
+    if canonical_dataset == "team":
+        payload = service.team_dataset(team_id)
+        return {
+            "team_id": team_id,
+            "dataset": canonical_dataset,
+            "columns": payload["columns"],
+            "rows": payload["rows"],
+            "rows_by_key": {row.get("row_key", ""): row for row in payload["rows"]},
+        }
 
-    if dataset_needs_refresh(canonical_dataset, columns, rows):
-        try:
-            scrape_team(team_id)
-            columns, rows = read_csv(path)
-        except Exception:
-            # Keep existing CSVs if they already contain rows and scrape fails.
-            if not rows:
-                raise
-
-    if dataset_needs_refresh(canonical_dataset, columns, rows):
-        raise RuntimeError(
-            f"{team_id}/{canonical_dataset} dataset is empty or invalid after refresh. "
-            "Scrape did not produce usable rows."
-        )
-
-    context = {
-        "team_id": team_id,
-        "dataset": canonical_dataset,
-        "columns": columns,
-        "rows": rows,
-        "rows_by_key": {row.get("row_key", ""): row for row in rows},
-    }
-    _apply_player_column_config(context)
-    return context
+    raise RuntimeError(f"Unsupported dataset: {canonical_dataset}")
 
 
 def rows_to_csv_text(columns: Sequence[str], rows: Sequence[Dict[str, str]]) -> str:
@@ -2803,21 +2863,49 @@ class ApiHandler(BaseHTTPRequestHandler):
                 query = urlparse(self.path).query.lower()
                 force = any(token in query for token in ("force=1", "refresh=1", "force=true", "refresh=true"))
                 payload = fetch_espn_teams(force_refresh=force)
-                # Ensure PDF-sourced opponent (UCR) is in the list for Data tab
-                teams = list(payload.get("teams") or [])
-                seen_ids = {t.get("team_id") for t in teams}
-                if "ucr" not in seen_ids:
-                    teams.append({
-                        "team_id": "ucr",
-                        "school_name": "UC Riverside",
-                        "abbreviation": "UCR",
-                        "team_ref": "",
-                    })
-                    teams.sort(key=lambda t: (t.get("school_name", ""), t.get("team_id", "")))
-                    payload = {**payload, "teams": teams}
                 self._send_json(200, payload)
             except Exception as exc:  # noqa: BLE001
                 self._send_json(500, {"error": str(exc)})
+            return
+
+        match = re.match(r"^/api/season/([0-9-]+)/team/([a-zA-Z0-9-]+)/games$", path)
+        if match:
+            try:
+                team_id = normalize_team_id(match.group(2))
+                rows = get_service().list_schedule_games(team_id)
+                self._send_json(200, {"season_id": match.group(1), "games": rows})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        match = re.match(r"^/api/season/([0-9-]+)/team/([a-zA-Z0-9-]+)/players$", path)
+        if match:
+            try:
+                team_id = normalize_team_id(match.group(2))
+                payload = get_service().player_dataset(team_id)
+                visible_columns = [column for column in payload["columns"] if column != "row_key"]
+                self._send_json(200, {"team_id": team_id, "columns": visible_columns, "rows": payload["rows"]})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        match = re.match(r"^/api/season/([0-9-]+)/team/([a-zA-Z0-9-]+)/team$", path)
+        if match:
+            try:
+                team_id = normalize_team_id(match.group(2))
+                payload = get_service().team_dataset(team_id)
+                visible_columns = [column for column in payload["columns"] if column != "row_key"]
+                self._send_json(200, {"team_id": team_id, "columns": visible_columns, "rows": payload["rows"]})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        match = re.match(r"^/api/build/jobs/([a-f0-9-]+)$", path)
+        if match:
+            try:
+                self._send_json(200, get_service().get_job(match.group(1)))
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(404, {"error": str(exc)})
             return
 
         match = re.match(r"^/api/espn/season/([a-zA-Z0-9-]+)/([a-zA-Z0-9_]+)$", path)
@@ -2830,8 +2918,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     raise ValueError("Use /api/pbp for play-by-play dataset")
 
                 context = build_dataset_context(team_id, dataset)
-                manifest = read_json_file(team_data_dir(team_id) / "manifest.json") or {}
-                school_name = context.get("school_name") or manifest.get("school_name", team_id)
+                school_name = context.get("school_name") or team_id
                 hidden_columns = {"row_key"}
                 visible_columns = [column for column in context["columns"] if column not in hidden_columns]
                 self._send_json(
@@ -2843,9 +2930,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "columns": visible_columns,
                         "rows": context["rows"],
                         "row_key": "row_key",
-                        "updated_at": manifest.get("last_updated", now_iso()),
-                        "source_urls": manifest.get("source_urls", []),
-                        "schema_version": manifest.get("schema_version", SCHEMA_VERSION),
+                        "updated_at": now_iso(),
+                        "source_urls": [],
+                        "schema_version": SCHEMA_VERSION,
                     },
                 )
             except Exception as exc:  # noqa: BLE001
@@ -2926,7 +3013,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                 dataset = normalize_dataset_name(match.group(2).lower())
 
                 context = build_dataset_context(team_id, dataset)
-                manifest = read_json_file(team_data_dir(team_id) / "manifest.json") or {}
                 hidden_columns = {"row_key"}
                 visible_columns = [column for column in context["columns"] if column not in hidden_columns]
 
@@ -2939,7 +3025,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "columns": visible_columns,
                         "rows": context["rows"],
                         "row_key": "row_key",
-                        "updated_at": manifest.get("last_updated", now_iso()),
+                        "updated_at": now_iso(),
                     },
                 )
             except Exception as exc:  # noqa: BLE001
@@ -2955,13 +3041,33 @@ class ApiHandler(BaseHTTPRequestHandler):
         if match:
             try:
                 body = self._read_json()
-                _ = bool(body.get("force", False))
+                force = bool(body.get("force", False))
                 team_id = normalize_team_id(match.group(1))
-                if get_pdf_path_for_team(team_id):
-                    self._send_json(200, {"ok": True, "summary": {"source": "pdf", "message": "Data loaded from PDF; no refresh needed."}})
-                    return
-                summary = scrape_team(team_id)
-                self._send_json(200, {"ok": True, "summary": summary})
+                job = get_service().start_build("season", team_id, force=force)
+                self._send_json(200, {"ok": True, "job": job})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/build/ucsb/2025-2026/regular/schedule":
+            try:
+                force = False
+                query = urlparse(self.path).query.lower()
+                if any(token in query for token in ("force=1", "force=true")):
+                    force = True
+                job = get_service().start_build("schedule", ROOT_TEAM_ID, force=force)
+                self._send_json(200, {"ok": True, "job": job})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/build/ucsb/2025-2026/regular/season":
+            try:
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                team_id = normalize_team_id((query.get("team_id") or [ROOT_TEAM_ID])[0])
+                force = (query.get("force") or ["false"])[0].lower() in {"1", "true", "yes"}
+                job = get_service().start_build("season", team_id, force=force)
+                self._send_json(200, {"ok": True, "job": job})
             except Exception as exc:  # noqa: BLE001
                 self._send_json(500, {"error": str(exc)})
             return
@@ -2982,8 +3088,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         if match:
             try:
                 team_id = normalize_team_id(match.group(1))
-                summary = scrape_team(team_id)
-                self._send_json(200, {"ok": True, "summary": summary})
+                job = get_service().start_build("season", team_id, force=False)
+                self._send_json(200, {"ok": True, "job": job})
             except Exception as exc:  # noqa: BLE001
                 self._send_json(500, {"error": str(exc)})
             return
@@ -3079,9 +3185,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 def run_server() -> None:
     load_dotenv(REPO_ROOT / ".env")
     host = os.environ.get("API_HOST", "0.0.0.0")
-    port = int(os.environ.get("API_PORT", "8000"))
-
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    port = int(os.environ.get("API_PORT", "8001"))
+    get_service()
 
     server = ThreadingHTTPServer((host, port), ApiHandler)
     print(f"Analytics API listening on http://{host}:{port}")
