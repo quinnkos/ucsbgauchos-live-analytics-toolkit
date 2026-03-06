@@ -107,24 +107,13 @@ PDF_TEAM_NAMES: Dict[str, str] = {
     "ucr": "UC Riverside",
 }
 
-# Sentinel values for computed columns in PLAYER_TABLE_CONFIG
-_COMPUTED_RPG = "__computed_rpg__"
-_COMPUTED_APG = "__computed_apg__"
-
-# Player table: single config dict defines order and mapping.
-# Keys = intended (final) column names, in display order. Values = existing (source) column names.
-# Only columns in .values() are kept; all others are dropped. row_key is preserved for evidence.
-# PPG = points per game (from avg_3). RPG, APG = rebounds/assists per game (computed from REB/GP, AST/GP).
 PLAYER_TABLE_CONFIG: Dict[str, str] = {
     "Player": "player",
     "GP-GS": "gp_gs",
     "MIN": "min",
     "PTS": "pts",
-    "PPG": "avg_3",
     "REB": "tot",
-    "RPG": _COMPUTED_RPG,
     "AST": "a",
-    "APG": _COMPUTED_APG,
     "TO": "to",
     "STL": "stl",
     "BLK": "blk",
@@ -1663,10 +1652,15 @@ def _live_team_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str, 
     return out
 
 
-def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _live_player_rows(
+    team_id: str,
+    rows: List[Dict[str, Any]],
+    seconds_by_team_and_athlete: Optional[Dict[str, Dict[str, int]]] = None,
+) -> List[Dict[str, Any]]:
     """Build player-level stat rows from PBP for one team. Columns match season player table."""
     tid = normalize_team_id(team_id)
     team_plays = [r for r in rows if _normalize_team_id_safe(r.get("team_id")) == tid]
+    team_seconds = (seconds_by_team_and_athlete or {}).get(tid, {})
     stats_by_athlete = _compute_live_player_stats(team_plays)
     all_athletes: Set[str] = set(stats_by_athlete)
     for r in team_plays:
@@ -1698,9 +1692,11 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
         "layup_a": 0,
         "dunks": 0,
         "tips": 0,
+        "seconds_played": 0,
     }
     for aid in sorted(all_athletes):
         stats = stats_by_athlete.get(aid, {})
+        seconds_played = int(team_seconds.get(aid, 0))
         pts = int(stats.get("pts", 0))
         ast = int(stats.get("ast", 0))
         reb = int(stats.get("oreb", 0)) + int(stats.get("dreb", 0))
@@ -1739,6 +1735,7 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
         totals["layup_a"] += layup_a
         totals["dunks"] += dunks
         totals["tips"] += tips
+        totals["seconds_played"] += seconds_played
         rk = unique_row_key(f"live_{tid}_player_{aid}", seen)
         out.append(
             {
@@ -1748,6 +1745,7 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
                     player_name=resolve_athlete_name(aid),
                     games_played=1,
                     games_started=0,
+                    seconds_played=seconds_played,
                     points=pts,
                     rebounds=reb,
                     assists=ast,
@@ -1778,6 +1776,7 @@ def _live_player_rows(team_id: str, rows: List[Dict[str, Any]]) -> List[Dict[str
                 player_name="Team",
                 games_played=1,
                 games_started=1,
+                seconds_played=totals["seconds_played"],
                 points=totals["pts"],
                 rebounds=totals["reb"],
                 assists=totals["ast"],
@@ -1809,7 +1808,9 @@ def build_live_stats_from_pbp(
     game_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build four datasets (ucsb_team, ucsb_players, opponent_team, opponent_players) from PBP only."""
-    rows = load_pbp_rows(game_id=game_id)
+    gid = (game_id or ESPN_PBP_GAME_ID).strip()
+    rows = load_pbp_rows(game_id=gid)
+    player_seconds = get_service().player_seconds_for_game(gid)
     ucsb_id = _normalize_team_id_safe(ucsb_team_id or DEFAULT_UCSB_TEAM_ID) or normalize_team_id(DEFAULT_UCSB_TEAM_ID)
     team_ids_in_pbp = set()
     for r in rows:
@@ -1833,7 +1834,7 @@ def build_live_stats_from_pbp(
             rws = _live_team_rows(tid, rows)
             cols = list(LIVE_TEAM_COLUMNS)
         else:
-            rws = _live_player_rows(tid, rows)
+            rws = _live_player_rows(tid, rows, player_seconds)
             cols = list(LIVE_PLAYER_COLUMNS)
         return {"columns": cols, "rows": rws}
 
@@ -2361,14 +2362,6 @@ def _player_table_config() -> Dict[str, str]:
     return dict(PLAYER_TABLE_CONFIG)
 
 
-def _parse_gp_from_gp_gs(gp_gs: str) -> Optional[int]:
-    """Extract GP (games played) from GP-GS stat, e.g. '28-28' -> 28, '10-5' -> 10."""
-    if not gp_gs or not isinstance(gp_gs, str):
-        return None
-    match = re.match(r"^(\d+)-", str(gp_gs).strip())
-    return int(match.group(1)) if match else None
-
-
 def _apply_player_column_config(context: Dict[str, Any]) -> None:
     """In-place: apply PLAYER_TABLE_CONFIG to player dataset (order + mapping; drop columns not in config)."""
     if context.get("dataset") != "players":
@@ -2385,26 +2378,8 @@ def _apply_player_column_config(context: Dict[str, Any]) -> None:
         new_row: Dict[str, str] = {}
         if "row_key" in existing_columns:
             new_row["row_key"] = row.get("row_key", "")
-        gp = _parse_gp_from_gp_gs(row.get("gp_gs", ""))
-        reb_raw = row.get("tot", "") or row.get("REB", "")
-        ast_raw = row.get("a", "") or row.get("AST", "")
         for intended_name, existing_name in config.items():
-            if existing_name == _COMPUTED_RPG:
-                try:
-                    reb = float(str(reb_raw).replace(",", ""))
-                    val = round(reb / gp, 1) if gp and gp > 0 else None
-                    new_row[intended_name] = str(val) if val is not None else ""
-                except (ValueError, TypeError):
-                    new_row[intended_name] = ""
-            elif existing_name == _COMPUTED_APG:
-                try:
-                    ast = float(str(ast_raw).replace(",", ""))
-                    val = round(ast / gp, 1) if gp and gp > 0 else None
-                    new_row[intended_name] = str(val) if val is not None else ""
-                except (ValueError, TypeError):
-                    new_row[intended_name] = ""
-            else:
-                new_row[intended_name] = row.get(existing_name, "")
+            new_row[intended_name] = row.get(existing_name, "")
         row.clear()
         row.update(new_row)
     context["columns"] = final_columns

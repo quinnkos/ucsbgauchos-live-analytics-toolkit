@@ -51,6 +51,124 @@ const UCSB_TEAM_ID = "2540";
 const PBP_TEAM_ID = "pbp";
 const HIDDEN_COLUMNS = new Set(["row_key"]);
 
+const SEASON_PER_GAME_COLUMNS = new Set([
+  "MIN", "PTS", "REB", "AST", "TO", "STL", "BLK", "PF",
+  "FGM", "FGA", "3PM", "3PA", "MIDR_M", "MIDR_A", "LAYUP_M", "LAYUP_A",
+  "DUNKS", "TIPS", "FTM", "FTA"
+]);
+
+function parseGpFromGpGs(gpGs) {
+  const match = String(gpGs || "").match(/^(\d+)-/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
+const SKIP_COLOR_COLUMNS = new Set(["team_id", "Player", "GP-GS", "row_key"]);
+const INVERTED_COLUMNS = new Set(["TO", "PF"]);
+const PERCENTAGE_COLUMNS = new Set(["FG%", "3P%", "FT%", "MIDR%", "LAYUP%"]);
+const ATTEMPT_COLUMN_MAP = { "FG%": "FGA", "3P%": "3PA", "FT%": "FTA", "MIDR%": "MIDR_A", "LAYUP%": "LAYUP_A" };
+
+function getCellColor(
+  liveValue,
+  seasonValue,
+  { isInverted = false, isPct = false, startPctDeviation = 0.5, capPctDeviation = 1.0 } = {}
+) {
+  if (seasonValue === 0 || seasonValue == null) return null;
+  let deviation = liveValue - seasonValue;
+  if (isInverted) deviation = -deviation;
+  const pctDeviation = deviation / Math.abs(seasonValue);
+
+  if (!isPct && pctDeviation < 0) {
+    return null;
+  }
+
+  const absPctDeviation = Math.abs(pctDeviation);
+  if (absPctDeviation < startPctDeviation) {
+    return null;
+  }
+
+  const safeCapPctDeviation = capPctDeviation > startPctDeviation ? capPctDeviation : startPctDeviation + 1e-6;
+  const t = Math.max(
+    0,
+    Math.min(1, (absPctDeviation - startPctDeviation) / (safeCapPctDeviation - startPctDeviation))
+  );
+
+  if (pctDeviation >= 0) {
+    const r = Math.round(255 - t * (255 - 144));
+    const g = Math.round(255 - t * (255 - 238));
+    const b = Math.round(255 - t * (255 - 144));
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  const r = 255;
+  const g = Math.round(255 - t * (255 - 160));
+  const b = Math.round(255 - t * (255 - 160));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function buildCellColorMap(row, seasonRow, columns, colorConfig = {}) {
+  if (!seasonRow) return null;
+  const seasonGp = parseGpFromGpGs(seasonRow["GP-GS"]);
+  const liveMin = Number(String(row["MIN"] ?? "").replace(/,/g, "")) || 0;
+  const minPctColorAttemptsRaw = Number(colorConfig.minPctColorAttempts);
+  const minPctColorAttempts = Number.isFinite(minPctColorAttemptsRaw)
+    ? Math.max(0, minPctColorAttemptsRaw)
+    : 0;
+  const colorMap = {};
+
+  for (const col of columns) {
+    if (SKIP_COLOR_COLUMNS.has(col)) continue;
+
+    const isPct = PERCENTAGE_COLUMNS.has(col);
+    const isCounting = !isPct && col !== "GP-GS";
+
+    if (isCounting && liveMin < 3) continue;
+
+    if (isPct) {
+      const attemptCol = ATTEMPT_COLUMN_MAP[col];
+      if (attemptCol) {
+        const liveAttempts = Number(String(row[attemptCol] ?? "").replace(/,/g, "")) || 0;
+        if (liveAttempts < minPctColorAttempts) continue;
+      }
+    }
+
+    const liveRaw = Number(String(row[col] ?? "").replace(/,/g, "").replace(/%/g, ""));
+    if (Number.isNaN(liveRaw)) continue;
+
+    let seasonVal;
+    if (isPct) {
+      seasonVal = Number(String(seasonRow[col] ?? "").replace(/,/g, "").replace(/%/g, ""));
+    } else {
+      const seasonTotal = Number(String(seasonRow[col] ?? "").replace(/,/g, ""));
+      if (Number.isNaN(seasonTotal) || !seasonGp) continue;
+      seasonVal = seasonTotal / seasonGp;
+    }
+    if (Number.isNaN(seasonVal)) continue;
+
+    const color = getCellColor(liveRaw, seasonVal, {
+      isInverted: INVERTED_COLUMNS.has(col),
+      isPct,
+      ...colorConfig
+    });
+    if (color) colorMap[col] = color;
+  }
+  return colorMap;
+}
+
+function convertSeasonRows(rows, columns, mode) {
+  if (mode === "totals") return rows;
+  return rows.map((row) => {
+    const gp = parseGpFromGpGs(row["GP-GS"]);
+    if (!gp) return row;
+    const converted = { ...row };
+    for (const col of columns) {
+      if (!SEASON_PER_GAME_COLUMNS.has(col)) continue;
+      const raw = Number(String(row[col] ?? "").replace(/,/g, ""));
+      if (Number.isNaN(raw)) continue;
+      converted[col] = (raw / gp).toFixed(1);
+    }
+    return converted;
+  });
+}
+
 const DEFAULT_TABLE_STATE = {
   filter: "",
   sortColumn: "",
@@ -144,7 +262,7 @@ function formatInsightErrorMessage(error) {
   return message;
 }
 
-function DataTable({ columns, rows, state, onChange, extraControls = null }) {
+function DataTable({ columns, rows, state, onChange, extraControls = null, cellColorFn = null, rowStyleFn = null }) {
   const rowRefs = useRef({});
 
   const sortedRows = useMemo(() => {
@@ -250,6 +368,7 @@ function DataTable({ columns, rows, state, onChange, extraControls = null }) {
                     }
                   }}
                   className={`${isSelected ? "selected" : ""} ${isHighlighted ? "highlighted" : ""}`.trim()}
+                  style={rowStyleFn ? rowStyleFn(row) : undefined}
                   onClick={() =>
                     onChange({
                       selectedRowKey: row.row_key || "",
@@ -257,9 +376,17 @@ function DataTable({ columns, rows, state, onChange, extraControls = null }) {
                     })
                   }
                 >
-                  {columns.map((column) => (
-                    <td key={`${rowKeyValue}_${column}`}>{row[column]}</td>
-                  ))}
+                  {columns.map((column) => {
+                    const cellColor = cellColorFn ? cellColorFn(row, column) : null;
+                    return (
+                      <td
+                        key={`${rowKeyValue}_${column}`}
+                        style={cellColor ? { backgroundColor: cellColor } : undefined}
+                      >
+                        {row[column]}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
@@ -326,6 +453,8 @@ export default function App() {
     opponent: { ...DEFAULT_TABLE_STATE }
   });
 
+  const [seasonStatMode, setSeasonStatMode] = useState("pergame");
+
   const [pbpData, setPbpData] = useState({ columns: [], rows: [], team_id: PBP_TEAM_ID, updated_at: "", source_url: "" });
   const [pbpGameId, setPbpGameId] = useState("401809115");
   const [pbpTableState, setPbpTableState] = useState({ ...DEFAULT_TABLE_STATE });
@@ -350,6 +479,9 @@ export default function App() {
     ucsb: { ...DEFAULT_TABLE_STATE },
     opponent: { ...DEFAULT_TABLE_STATE }
   });
+  const [liveColorStartPctDeviation, setLiveColorStartPctDeviation] = useState(0.5);
+  const [liveColorCapPctDeviation, setLiveColorCapPctDeviation] = useState(1.0);
+  const [minPctColorAttempts, setMinPctColorAttempts] = useState(5);
 
   const [prompt, setPrompt] = useState("");
   const [contextEnabled, setContextEnabled] = useState({
@@ -726,12 +858,102 @@ export default function App() {
   const opponentDisplayName = teamNameById[normalizedOpponentTeamId] || normalizedOpponentTeamId || "Opponent";
   const activeSeasonName = activeSeasonSide === "ucsb" ? ucsbDisplayName : opponentDisplayName;
   const activeLivePrefix = activeLiveSide === "ucsb" ? "ucsb" : "opponent";
+  const seasonDataByTeamId = useMemo(() => {
+    const map = {};
+    if (seasonPlayers.ucsb.rows.length) {
+      map[UCSB_TEAM_ID] = seasonPlayers.ucsb;
+    }
+    if (normalizedOpponentTeamId && seasonPlayers.opponent.rows.length) {
+      map[normalizedOpponentTeamId] = seasonPlayers.opponent;
+    }
+    return map;
+  }, [seasonPlayers, normalizedOpponentTeamId]);
+
   const activeSeasonPlayers = seasonPlayers[activeSeasonSide];
+  const activeSeasonDisplayRows = useMemo(
+    () => convertSeasonRows(activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode),
+    [activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode]
+  );
   const activeSeasonPlayersLoading = seasonPlayersLoading[activeSeasonSide];
   const activeSeasonPlayersError = seasonPlayersError[activeSeasonSide];
   const activeSeasonPlayersTableState = seasonPlayersTableState[activeSeasonSide];
   const livePlayersData = liveStats[`${activeLivePrefix}_players`] || { columns: [], rows: [] };
   const activeLivePlayersTableState = livePlayersTableState[activeLiveSide];
+  const liveColorCapMin = useMemo(
+    () => Math.min(2, Math.max(0.5, Number((liveColorStartPctDeviation + 0.05).toFixed(2)))),
+    [liveColorStartPctDeviation]
+  );
+  const liveColorConfig = useMemo(
+    () => ({
+      startPctDeviation: liveColorStartPctDeviation,
+      capPctDeviation: liveColorCapPctDeviation,
+      minPctColorAttempts
+    }),
+    [liveColorStartPctDeviation, liveColorCapPctDeviation, minPctColorAttempts]
+  );
+
+  useEffect(() => {
+    if (liveColorCapPctDeviation < liveColorCapMin) {
+      setLiveColorCapPctDeviation(liveColorCapMin);
+    }
+  }, [liveColorCapPctDeviation, liveColorCapMin]);
+
+  const handleLiveColorStartChange = useCallback((event) => {
+    const nextStart = Number.parseFloat(event.target.value);
+    if (Number.isNaN(nextStart)) return;
+    setLiveColorStartPctDeviation(nextStart);
+  }, []);
+
+  const handleLiveColorCapChange = useCallback((event) => {
+    const nextCap = Number.parseFloat(event.target.value);
+    if (Number.isNaN(nextCap)) return;
+    setLiveColorCapPctDeviation(nextCap);
+  }, []);
+
+  const handleMinPctColorAttemptsChange = useCallback((event) => {
+    const nextValue = Number.parseInt(event.target.value, 10);
+    if (Number.isNaN(nextValue)) return;
+    setMinPctColorAttempts(Math.max(0, nextValue));
+  }, []);
+
+  const liveColorCache = useMemo(() => {
+    const cache = new Map();
+    for (const row of livePlayersData.rows) {
+      const teamId = String(row.team_id || "").trim();
+      const playerName = String(row.Player || "").trim();
+      const seasonData = seasonDataByTeamId[teamId];
+      if (!seasonData || !seasonData.rows.length) {
+        cache.set(row, { noData: true });
+        continue;
+      }
+      const isTeamRow = playerName === "Team";
+      const seasonRow = seasonData.rows.find((sr) =>
+        isTeamRow
+          ? String(sr.Player || "").trim() === "Team"
+          : String(sr.Player || "").trim() === playerName
+      );
+      if (!seasonRow) {
+        cache.set(row, { noData: true });
+        continue;
+      }
+      const colorMap = buildCellColorMap(row, seasonRow, livePlayersData.columns, liveColorConfig);
+      cache.set(row, { noData: false, colors: colorMap || {} });
+    }
+    return cache;
+  }, [livePlayersData.rows, livePlayersData.columns, seasonDataByTeamId, liveColorConfig]);
+
+  const liveCellColorFn = useCallback((row, column) => {
+    const entry = liveColorCache.get(row);
+    if (!entry || entry.noData) return null;
+    return entry.colors[column] || null;
+  }, [liveColorCache]);
+
+  const liveRowStyleFn = useCallback((row) => {
+    const entry = liveColorCache.get(row);
+    if (entry && entry.noData) return { backgroundColor: "#f0f0f0" };
+    return null;
+  }, [liveColorCache]);
+
   const pbpCanApply = canApplyPbpAdvancedFilters(pbpAdvancedFiltersDraft);
   const pbpFiltersDirty = !pbpAdvancedFiltersEqual(pbpAdvancedFiltersDraft, pbpAppliedFilters);
   const pbpClockHint = useMemo(() => {
@@ -1070,7 +1292,7 @@ export default function App() {
             </div>
             <DataTable
               columns={activeSeasonPlayers.columns}
-              rows={activeSeasonPlayers.rows}
+              rows={activeSeasonDisplayRows}
               state={activeSeasonPlayersTableState}
               onChange={(patch) =>
                 setSeasonPlayersTableState((prev) => ({
@@ -1080,6 +1302,24 @@ export default function App() {
                     ...patch
                   }
                 }))
+              }
+              extraControls={
+                <div className="stat-mode-toggle">
+                  <button
+                    type="button"
+                    className={seasonStatMode === "totals" ? "active" : ""}
+                    onClick={() => setSeasonStatMode("totals")}
+                  >
+                    Totals
+                  </button>
+                  <button
+                    type="button"
+                    className={seasonStatMode === "pergame" ? "active" : ""}
+                    onClick={() => setSeasonStatMode("pergame")}
+                  >
+                    Per Game
+                  </button>
+                </div>
               }
             />
               </>
@@ -1194,6 +1434,48 @@ export default function App() {
                         ...patch
                       }
                     }))
+                  }
+                  cellColorFn={liveCellColorFn}
+                  rowStyleFn={liveRowStyleFn}
+                  extraControls={
+                    <div className="live-color-controls">
+                      <label>
+                        <span className="control-label">
+                          Color start (pct dev) <strong className="control-value">{liveColorStartPctDeviation.toFixed(2)}</strong>
+                        </span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={liveColorStartPctDeviation}
+                          onChange={handleLiveColorStartChange}
+                        />
+                      </label>
+                      <label>
+                        <span className="control-label">
+                          Color cap (pct dev) <strong className="control-value">{liveColorCapPctDeviation.toFixed(2)}</strong>
+                        </span>
+                        <input
+                          type="range"
+                          min={liveColorCapMin}
+                          max="2"
+                          step="0.05"
+                          value={liveColorCapPctDeviation}
+                          onChange={handleLiveColorCapChange}
+                        />
+                      </label>
+                      <label>
+                        <span className="control-label">Min attempts for % color</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={minPctColorAttempts}
+                          onChange={handleMinPctColorAttemptsChange}
+                        />
+                      </label>
+                    </div>
                   }
                 />
               </>

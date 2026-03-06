@@ -2,8 +2,15 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from apps.api.local_first import LocalFirstService, classify_shot_zone, derive_game_stats, format_pct
+from apps.api.local_first import (
+    LocalFirstService,
+    classify_shot_zone,
+    compute_seconds_played_from_pbp,
+    derive_game_stats,
+    format_pct,
+)
 
 
 class ShotZoneHeuristicTests(unittest.TestCase):
@@ -75,6 +82,279 @@ class ShotZoneHeuristicTests(unittest.TestCase):
         self.assertEqual(team_stats["tips"], 1)
         self.assertEqual(player_stats["dunks"], 1)
         self.assertEqual(player_stats["tips"], 1)
+
+    def test_derive_game_stats_ignores_zero_stat_administrative_participants(self) -> None:
+        team_rows, player_rows = derive_game_stats(
+            [
+                {
+                    "team_id": "27",
+                    "athlete_id": "21813",
+                    "assist_athlete_id": "",
+                    "scoring_play": 0,
+                    "shooting_play": 0,
+                    "score_value": 0,
+                    "points_attempted": 0,
+                    "play_type": "Coach's Challenge (Overturned)",
+                    "text": "UC Riverside Coach's Challenge (Upheld) UC Riverside charged with a timeout",
+                },
+                {
+                    "team_id": "27",
+                    "athlete_id": "5174613",
+                    "assist_athlete_id": "",
+                    "scoring_play": 1,
+                    "shooting_play": 1,
+                    "score_value": 2,
+                    "points_attempted": 2,
+                    "play_type": "LayUpShot",
+                    "text": "made layup",
+                },
+            ],
+            {"27": {"5174613": "Marqui Worthy Jr."}},
+        )
+        _, team_stats = team_rows[0]
+        self.assertEqual(team_stats["points"], 2)
+        self.assertEqual(len(player_rows), 1)
+        self.assertEqual(player_rows[0]["athlete_id"], "5174613")
+
+
+class MinutesPlayedTests(unittest.TestCase):
+    def test_compute_seconds_played_from_pbp_tracks_substitutions(self) -> None:
+        plays = [
+            {
+                "sequence_number": 1,
+                "period_number": 1,
+                "clock_seconds": 1200,
+                "team_id": "2540",
+                "athlete_id": "",
+                "play_type": "Start Game",
+                "text": "Start game",
+            },
+            {
+                "sequence_number": 2,
+                "period_number": 1,
+                "clock_seconds": 900,
+                "team_id": "2540",
+                "athlete_id": "1",
+                "play_type": "Substitution",
+                "text": "Guard One subbing out",
+            },
+            {
+                "sequence_number": 3,
+                "period_number": 1,
+                "clock_seconds": 900,
+                "team_id": "2540",
+                "athlete_id": "6",
+                "play_type": "Substitution",
+                "text": "Bench One subbing in",
+            },
+            {
+                "sequence_number": 4,
+                "period_number": 1,
+                "clock_seconds": 0,
+                "team_id": "2540",
+                "athlete_id": "",
+                "play_type": "End Period",
+                "text": "End of 1st half",
+            },
+        ]
+        seconds = compute_seconds_played_from_pbp(
+            plays,
+            {"2540": {"1", "2", "3", "4", "5"}},
+        )
+        self.assertEqual(seconds["2540"]["1"], 300)
+        self.assertEqual(seconds["2540"]["6"], 900)
+        self.assertEqual(seconds["2540"]["2"], 1200)
+        self.assertEqual(sum(seconds["2540"].values()), 6000)
+
+    def test_compute_seconds_played_from_pbp_infers_missing_starter_on_sub_out(self) -> None:
+        plays = [
+            {
+                "sequence_number": 1,
+                "period_number": 1,
+                "clock_seconds": 1200,
+                "team_id": "2540",
+                "athlete_id": "",
+                "play_type": "Start Game",
+                "text": "Start game",
+            },
+            {
+                "sequence_number": 2,
+                "period_number": 1,
+                "clock_seconds": 600,
+                "team_id": "2540",
+                "athlete_id": "1",
+                "play_type": "Substitution",
+                "text": "Guard One subbing out",
+            },
+            {
+                "sequence_number": 3,
+                "period_number": 1,
+                "clock_seconds": 600,
+                "team_id": "2540",
+                "athlete_id": "6",
+                "play_type": "Substitution",
+                "text": "Bench One subbing in",
+            },
+            {
+                "sequence_number": 4,
+                "period_number": 1,
+                "clock_seconds": 0,
+                "team_id": "2540",
+                "athlete_id": "",
+                "play_type": "End Period",
+                "text": "Final",
+            },
+        ]
+        seconds = compute_seconds_played_from_pbp(plays, {"2540": set()})
+        self.assertEqual(seconds["2540"]["1"], 600)
+        self.assertEqual(seconds["2540"]["6"], 600)
+
+    def test_derive_and_aggregate_persist_minutes_played(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
+            with service.connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO pbp_plays (
+                        game_id, play_key, espn_play_id, sequence_number, period_number, period_display,
+                        clock, clock_seconds, team_id, athlete_id, assist_athlete_id, play_type, text,
+                        scoring_play, shooting_play, score_value, points_attempted, home_score, away_score,
+                        wallclock, ingest_id, raw_payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            "game-1",
+                            "play_1",
+                            "1",
+                            1,
+                            1,
+                            "1st",
+                            "20:00",
+                            1200,
+                            "2540",
+                            "",
+                            "",
+                            "Start Game",
+                            "Start game",
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "",
+                            "ingest-1",
+                            "{}",
+                        ),
+                        (
+                            "game-1",
+                            "play_2",
+                            "2",
+                            2,
+                            1,
+                            "1st",
+                            "15:00",
+                            900,
+                            "2540",
+                            "1",
+                            "",
+                            "LayUpShot",
+                            "made layup",
+                            1,
+                            1,
+                            2,
+                            2,
+                            2,
+                            0,
+                            "",
+                            "ingest-1",
+                            "{}",
+                        ),
+                        (
+                            "game-1",
+                            "play_3",
+                            "3",
+                            3,
+                            1,
+                            "1st",
+                            "10:00",
+                            600,
+                            "2540",
+                            "1",
+                            "",
+                            "Substitution",
+                            "Guard One subbing out",
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "",
+                            "ingest-1",
+                            "{}",
+                        ),
+                        (
+                            "game-1",
+                            "play_4",
+                            "4",
+                            4,
+                            1,
+                            "1st",
+                            "10:00",
+                            600,
+                            "2540",
+                            "6",
+                            "",
+                            "Substitution",
+                            "Bench One subbing in",
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            "",
+                            "ingest-1",
+                            "{}",
+                        ),
+                        (
+                            "game-1",
+                            "play_5",
+                            "5",
+                            5,
+                            1,
+                            "1st",
+                            "00:00",
+                            0,
+                            "2540",
+                            "6",
+                            "",
+                            "LayUpShot",
+                            "made layup",
+                            1,
+                            1,
+                            2,
+                            2,
+                            2,
+                            0,
+                            "",
+                            "ingest-1",
+                            "{}",
+                        ),
+                    ],
+                )
+            with patch("apps.api.local_first.fetch_team_roster", return_value={"1": "Guard One", "6": "Bench One"}):
+                with patch.object(service.build_service, "starting_lineups_for_game", return_value={"2540": {"1"}}):
+                    self.assertTrue(service.derive_game_stats("game-1"))
+            service.aggregate_season()
+            payload = service.player_dataset("2540")
+            player_minutes = {row["Player"]: row["MIN"] for row in payload["rows"]}
+            self.assertEqual(player_minutes["Guard One"], "10.0")
+            self.assertEqual(player_minutes["Bench One"], "10.0")
+            self.assertEqual(player_minutes["Team"], "20.0")
 
 
 class PercentageFromMakesAttemptsTests(unittest.TestCase):
