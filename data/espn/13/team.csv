@@ -1,2 +1,0 @@
-row_key,team_id,split,stat_key,stat_name,value,numeric_value,display_value,rank,abbreviation
-13_overall_ref,13,overall,ref,$ref,http://sports.core.api.espn.com/v2/sports/basketball/leagues/mens-college-basketball/seasons/2026/types/0/teams/13/statistics/0?lang=en&region=us,,http://sports.core.api.espn.com/v2/sports/basketball/leagues/mens-college-basketball/seasons/2026/types/0/teams/13/statistics/0?lang=en&region=us,,

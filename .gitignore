@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.ipynb_checkpoints/
 
 # Node
 node_modules/
@@ -12,13 +13,15 @@ apps/web/node_modules/
 # Build outputs
 apps/web/dist/
 
-# Local docs
-docs/
-
 # Local env
 .env
 
+# OS/editor artifacts
+.DS_Store
+.cursor/
+test.ipynb
+
 # Local runtime artifacts
 var/
-data/
+/data/
 *.sqlite3
