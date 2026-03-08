@@ -576,8 +576,6 @@ def parse_schedule_payload(payload: Dict[str, Any], team_id: str) -> List[Dict[s
         competition = competitions[0]
         competition_type = competition.get("type") or {}
         competition_slug = str(competition_type.get("slug") or "").strip().lower()
-        if competition_slug == "tournament":
-            continue
         competitors = competition.get("competitors") or []
         ours = next(
             (
