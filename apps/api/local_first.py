@@ -1584,6 +1584,22 @@ class BuildService:
         )
         return rows
 
+    def raw_pbp_graph_rows(self, game_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        target = game_id or self.default_game_id()
+        rows = self.db.fetch_all(
+            """
+            SELECT espn_play_id AS id, sequence_number AS sequence, period_number, period_display AS period,
+                   clock, clock_seconds, text, play_type AS type, team_id, home_score, away_score,
+                   scoring_play, shooting_play, score_value, points_attempted, wallclock, athlete_id,
+                   assist_athlete_id, play_key, raw_payload
+            FROM pbp_plays
+            WHERE game_id = ?
+            ORDER BY sequence_number, play_key
+            """,
+            (target,),
+        )
+        return rows
+
     def derive_and_store_game_stats(self, game_id: str, force: bool = False) -> bool:
         rows = self._stats_pbp_rows(game_id)
         if not rows:
@@ -2188,6 +2204,9 @@ class LocalFirstService:
 
     def load_pbp_rows(self, game_id: str) -> List[Dict[str, Any]]:
         return self.build_service.raw_pbp_rows(game_id)
+
+    def load_pbp_graph_rows(self, game_id: str) -> List[Dict[str, Any]]:
+        return self.build_service.raw_pbp_graph_rows(game_id)
 
     def player_seconds_for_game(self, game_id: str, period_scope: str = "full") -> Dict[str, Dict[str, int]]:
         return self.build_service.player_seconds_for_game_scope(game_id, period_scope=period_scope)

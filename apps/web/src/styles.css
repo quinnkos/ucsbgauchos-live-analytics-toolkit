@@ -681,6 +681,168 @@ tbody tr.highlighted > td {
   min-width: 220px;
 }
 
+.graphs-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 12px 12px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.graph-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  isolation: isolate;
+}
+
+.graph-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #dfe4d2;
+  min-width: 0;
+}
+
+.graph-card-header h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  min-width: 0;
+}
+
+.graph-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.chart-frame {
+  width: 100%;
+  height: clamp(220px, 30vh, 280px);
+  min-height: 220px;
+  min-width: 0;
+}
+
+.graph-metric-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.graph-metric-pills button {
+  background: #f3f6ee;
+}
+
+.graph-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.graph-empty {
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  background: rgba(240, 242, 234, 0.9);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.graph-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.graph-legend-swatch {
+  flex: 0 0 auto;
+  opacity: var(--legend-opacity, 1);
+}
+
+.graph-legend-swatch.line {
+  width: 18px;
+  border-top: 3px solid var(--legend-color);
+}
+
+.graph-legend-swatch.line.dashed {
+  border-top-style: dashed;
+}
+
+.graph-legend-swatch.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--legend-color);
+  border: 1px solid rgba(28, 35, 25, 0.18);
+}
+
+.graph-tooltip {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 8px 10px;
+  box-shadow: 0 8px 20px rgba(28, 35, 25, 0.12);
+  font-size: 0.8rem;
+  max-width: min(240px, calc(100vw - 48px));
+}
+
+.graph-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.graph-tooltip-swatch {
+  width: 14px;
+  flex: 0 0 auto;
+  border-top: 2px solid var(--tooltip-color);
+}
+
+.graph-tooltip-swatch.dashed {
+  border-top-style: dashed;
+}
+
+.chart-frame .recharts-responsive-container {
+  min-width: 0 !important;
+}
+
+.chart-frame .recharts-wrapper {
+  inset: 0;
+}
+
 .table-empty {
   padding: 18px;
   color: var(--muted);
@@ -707,5 +869,21 @@ tbody tr.highlighted > td {
 
   .leaf {
     flex: 1;
+  }
+
+  .graph-card-header {
+    flex-direction: column;
+  }
+
+  .graph-metric-pills {
+    justify-content: flex-start;
+  }
+
+  .graphs-layout {
+    padding: 0 10px 10px;
+  }
+
+  .chart-frame {
+    height: 220px;
   }
 }

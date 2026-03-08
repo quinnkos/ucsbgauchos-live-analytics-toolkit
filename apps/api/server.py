@@ -18,6 +18,7 @@ import requests
 from .local_first import (
     PLAYER_TABLE_COLUMNS,
     ROOT_TEAM_ID,
+    classify_shot_zone,
     field_goal_breakdown_metrics,
     get_service,
     normalize_period_scope,
@@ -1282,6 +1283,11 @@ def load_pbp_rows(game_id: Optional[str] = None) -> List[Dict[str, Any]]:
     return get_service().load_pbp_rows(gid)
 
 
+def load_pbp_graph_rows(game_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    gid = (game_id or ESPN_PBP_GAME_ID).strip()
+    return get_service().load_pbp_graph_rows(gid)
+
+
 def build_pbp_context(team_id: str = "pbp", game_id: Optional[str] = None) -> Dict[str, Any]:
     return build_pbp_context_filtered(team_id=team_id, game_id=game_id, filters=None)
 
@@ -1327,6 +1333,26 @@ LIVE_PLAYER_COLUMNS = [
     "team_id", *PLAYER_TABLE_COLUMNS,
 ]
 
+GRAPH_COUNTING_METRICS: List[Tuple[str, str]] = [
+    ("PTS", "Points"),
+    ("REB", "Rebounds"),
+    ("AST", "Assists"),
+    ("TO", "Turnovers"),
+    ("STL", "Steals"),
+    ("BLK", "Blocks"),
+    ("PF", "Personal Fouls"),
+]
+GRAPH_DEFAULT_METRIC_KEYS = ["PTS", "REB", "AST", "TO"]
+SHOT_FAMILY_KEYS: List[Tuple[str, str]] = [
+    ("FG", "FG"),
+    ("3PT", "3PT"),
+    ("LAYUP", "Layups"),
+    ("MIDRANGE", "Midrange"),
+    ("DUNK", "Dunks"),
+]
+SHOT_CHART_COURT_WIDTH = 50.0
+SHOT_CHART_COURT_LENGTH = 47.0
+
 
 def _normalize_team_id_safe(value: Optional[str]) -> Optional[str]:
     """Return normalized team_id or None if value is empty/invalid (avoids ValueError)."""
@@ -1361,6 +1387,356 @@ def _is_turnover_type(value: Any) -> bool:
 
 def _is_foul_type(value: Any) -> bool:
     return "foul" in str(value or "").lower()
+
+
+def _safe_json_loads(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric
+
+
+def _period_lengths_from_rows(rows: Sequence[Dict[str, Any]]) -> Dict[int, int]:
+    lengths: Dict[int, int] = {}
+    for row in rows:
+        period_number = _safe_int(row.get("period_number"))
+        if period_number <= 0:
+            continue
+        lengths[period_number] = max(lengths.get(period_number, 0), _safe_int(row.get("clock_seconds")))
+    return lengths
+
+
+def elapsed_game_seconds(row: Dict[str, Any], period_lengths: Dict[int, int]) -> int:
+    period_number = _safe_int(row.get("period_number"))
+    if period_number <= 0 or period_number not in period_lengths:
+        return 0
+    period_length = max(period_lengths.get(period_number, 0), 0)
+    clock_seconds = max(_safe_int(row.get("clock_seconds")), 0)
+    prior_periods = sum(period_lengths[p] for p in sorted(period_lengths) if p < period_number)
+    return prior_periods + max(period_length - min(clock_seconds, period_length), 0)
+
+
+def _graph_metric_totals() -> Dict[str, int]:
+    return {key: 0 for key, _ in GRAPH_COUNTING_METRICS}
+
+
+def _increment_total(totals: Dict[str, int], key: str, amount: int = 1) -> None:
+    if key in totals:
+        totals[key] += amount
+
+
+def _shot_family_totals() -> Dict[str, int]:
+    totals: Dict[str, int] = {}
+    for family_key, _ in SHOT_FAMILY_KEYS:
+        totals[f"{family_key}_M"] = 0
+        totals[f"{family_key}_A"] = 0
+    return totals
+
+
+def _parse_shooter_name(text: Any, athlete_id: Any) -> str:
+    match = re.match(r"^\s*(.+?)\s+(?:made|missed|makes|misses)\b", str(text or ""), flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip(" .")
+    aid = str(athlete_id or "").strip()
+    return f"Player {aid}" if aid else "Unknown"
+
+
+def _shot_family_key(row: Dict[str, Any]) -> Optional[str]:
+    play_type = str(row.get("type") or "")
+    text = str(row.get("text") or "")
+    points_attempted = _safe_int(row.get("points_attempted"))
+    if _is_free_throw_text(text):
+        return None
+    if not bool(row.get("shooting_play")):
+        return None
+    if points_attempted in {2, 3}:
+        if points_attempted == 3:
+            return "3PT"
+        zone = classify_shot_zone(play_type, points_attempted)
+        if zone == "layup":
+            return "LAYUP"
+        if zone == "mid":
+            return "MIDRANGE"
+        if zone == "dunk":
+            return "DUNK"
+        return "FG"
+    return None
+
+
+def _apply_counting_metric_update(totals: Dict[str, int], row: Dict[str, Any]) -> None:
+    play_type = str(row.get("type") or "")
+    text = str(row.get("text") or "")
+    scoring_play = bool(row.get("scoring_play"))
+    shooting_play = bool(row.get("shooting_play"))
+    score_value = _safe_int(row.get("score_value"))
+    points_attempted = _safe_int(row.get("points_attempted"))
+    assist_id = str(row.get("assist_athlete_id") or "").strip()
+
+    if scoring_play:
+        _increment_total(totals, "PTS", score_value)
+
+    if shooting_play and points_attempted in {2, 3}:
+        _increment_total(totals, "FGA")
+        if points_attempted == 3:
+            _increment_total(totals, "3PA")
+
+    if scoring_play and score_value in {2, 3}:
+        _increment_total(totals, "FGM")
+        if score_value == 3:
+            _increment_total(totals, "3PM")
+
+    if _is_free_throw_text(text):
+        _increment_total(totals, "FTA")
+        if scoring_play and score_value == 1:
+            _increment_total(totals, "FTM")
+
+    if play_type == "Offensive Rebound" or play_type == "Defensive Rebound":
+        _increment_total(totals, "REB")
+    if _is_turnover_type(play_type):
+        _increment_total(totals, "TO")
+    if play_type == "Steal":
+        _increment_total(totals, "STL")
+    if play_type == "Block Shot":
+        _increment_total(totals, "BLK")
+    if _is_foul_type(play_type):
+        _increment_total(totals, "PF")
+    if assist_id and scoring_play:
+        _increment_total(totals, "AST")
+
+
+def _apply_shot_family_update(totals: Dict[str, int], row: Dict[str, Any]) -> None:
+    scoring_play = bool(row.get("scoring_play"))
+    points_attempted = _safe_int(row.get("points_attempted"))
+    if not bool(row.get("shooting_play")):
+        return
+    if points_attempted in {2, 3}:
+        totals["FG_A"] += 1
+        if scoring_play:
+            totals["FG_M"] += 1
+    if points_attempted == 3:
+        totals["3PT_A"] += 1
+        if scoring_play:
+            totals["3PT_M"] += 1
+    family_key = _shot_family_key(row)
+    if family_key in {"LAYUP", "MIDRANGE", "DUNK"} and f"{family_key}_A" in totals:
+        totals[f"{family_key}_A"] += 1
+        if scoring_play:
+            totals[f"{family_key}_M"] += 1
+
+
+def _graph_point(elapsed_seconds: int, totals: Dict[str, int], period_number: int) -> Dict[str, Any]:
+    return {"elapsed_seconds": elapsed_seconds, "period_number": period_number, **totals}
+
+
+def _append_or_replace_graph_point(
+    points: List[Dict[str, Any]],
+    *,
+    elapsed_seconds: int,
+    period_number: int,
+    totals: Dict[str, int],
+) -> None:
+    point = _graph_point(elapsed_seconds, totals, period_number)
+    if points and points[-1]["elapsed_seconds"] == elapsed_seconds:
+        points[-1] = point
+    else:
+        points.append(point)
+
+
+def _valid_shot_coordinate(value: Optional[float], *, upper_bound: float) -> bool:
+    if value is None:
+        return False
+    return -5.0 <= value <= upper_bound
+
+
+def _team_requires_second_half_normalization(shots: Sequence[Dict[str, Any]]) -> bool:
+    first_half = [
+        shot["raw_y"]
+        for shot in shots
+        if shot["period_number"] == 1 and shot["family"] != "Free Throw" and shot["raw_y"] is not None
+    ]
+    second_half = [
+        shot["raw_y"]
+        for shot in shots
+        if shot["period_number"] >= 2 and shot["family"] != "Free Throw" and shot["raw_y"] is not None
+    ]
+    if not second_half:
+        return False
+    second_avg = sum(second_half) / len(second_half)
+    if first_half:
+        first_avg = sum(first_half) / len(first_half)
+        return second_avg > (SHOT_CHART_COURT_LENGTH / 2.0) and second_avg > first_avg + 6.0
+    return second_avg > (SHOT_CHART_COURT_LENGTH / 2.0)
+
+
+def normalize_shot_chart_coordinates(shots: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
+    needs_transform = _team_requires_second_half_normalization(shots)
+    output: List[Dict[str, Any]] = []
+    for shot in shots:
+        x_value = shot["raw_x"]
+        y_value = shot["raw_y"]
+        should_transform = needs_transform and shot["period_number"] >= 2
+        if should_transform:
+            x_value = SHOT_CHART_COURT_WIDTH - x_value
+            y_value = SHOT_CHART_COURT_LENGTH - y_value
+        output.append(
+            {
+                **shot,
+                "chart_x": round(x_value, 2),
+                "chart_y": round(y_value, 2),
+                "normalized": should_transform,
+            }
+        )
+    return output, needs_transform
+
+
+def build_pbp_graphs(
+    ucsb_team_id: Optional[str] = None,
+    opponent_team_id: Optional[str] = None,
+    game_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    gid = (game_id or ESPN_PBP_GAME_ID).strip()
+    rows = load_pbp_graph_rows(game_id=gid)
+    ucsb_id = _normalize_team_id_safe(ucsb_team_id or DEFAULT_UCSB_TEAM_ID) or normalize_team_id(DEFAULT_UCSB_TEAM_ID)
+    team_ids_in_pbp = {
+        normalize_team_id(str(row.get("team_id")))
+        for row in rows
+        if _normalize_team_id_safe(row.get("team_id"))
+    }
+    opp_id = _normalize_team_id_safe(opponent_team_id or "") or ""
+    if opp_id and opp_id not in team_ids_in_pbp:
+        opp_id = ""
+    if not opp_id:
+        other_ids = sorted(team_id for team_id in team_ids_in_pbp if team_id != ucsb_id)
+        opp_id = other_ids[0] if other_ids else ""
+
+    team_ids = [ucsb_id]
+    if opp_id:
+        team_ids.append(opp_id)
+
+    period_lengths = _period_lengths_from_rows(rows)
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (_safe_int(row.get("sequence")), str(row.get("play_key") or "")),
+    )
+    elapsed_by_play_key: Dict[str, int] = {}
+    latest_elapsed_seconds = 0
+    for row in ordered_rows:
+        elapsed_seconds = elapsed_game_seconds(row, period_lengths)
+        elapsed_by_play_key[str(row.get("play_key") or "")] = elapsed_seconds
+        latest_elapsed_seconds = max(latest_elapsed_seconds, elapsed_seconds)
+
+    cumulative_by_team = {team_id: _graph_metric_totals() for team_id in team_ids}
+    cumulative_points_by_team: Dict[str, List[Dict[str, Any]]] = {
+        team_id: [_graph_point(0, cumulative_by_team[team_id].copy(), 1)]
+        for team_id in team_ids
+    }
+    family_totals_by_team = {team_id: _shot_family_totals() for team_id in team_ids}
+    family_points_by_team: Dict[str, List[Dict[str, Any]]] = {
+        team_id: [_graph_point(0, family_totals_by_team[team_id].copy(), 1)]
+        for team_id in team_ids
+    }
+    raw_shots_by_team: Dict[str, List[Dict[str, Any]]] = {team_id: [] for team_id in team_ids}
+
+    for row in ordered_rows:
+        row_team_id = _normalize_team_id_safe(row.get("team_id")) or ""
+        elapsed_seconds = elapsed_by_play_key.get(str(row.get("play_key") or ""), 0)
+        period_number = _safe_int(row.get("period_number")) or 1
+        payload = _safe_json_loads(row.get("raw_payload"))
+        coordinate = payload.get("coordinate") if isinstance(payload.get("coordinate"), dict) else {}
+        raw_x = _safe_float((coordinate or {}).get("x"))
+        raw_y = _safe_float((coordinate or {}).get("y"))
+
+        for team_id in team_ids:
+            if row_team_id == team_id:
+                _apply_counting_metric_update(cumulative_by_team[team_id], row)
+                _apply_shot_family_update(family_totals_by_team[team_id], row)
+            _append_or_replace_graph_point(
+                cumulative_points_by_team[team_id],
+                elapsed_seconds=elapsed_seconds,
+                period_number=period_number,
+                totals=cumulative_by_team[team_id].copy(),
+            )
+            _append_or_replace_graph_point(
+                family_points_by_team[team_id],
+                elapsed_seconds=elapsed_seconds,
+                period_number=period_number,
+                totals=family_totals_by_team[team_id].copy(),
+            )
+
+        if row_team_id not in raw_shots_by_team:
+            continue
+        if not bool(row.get("shooting_play")):
+            continue
+        if not _valid_shot_coordinate(raw_x, upper_bound=SHOT_CHART_COURT_WIDTH + 5.0):
+            continue
+        if not _valid_shot_coordinate(raw_y, upper_bound=SHOT_CHART_COURT_LENGTH + 5.0):
+            continue
+        family_key = _shot_family_key(row)
+        family_label = next((label for key, label in SHOT_FAMILY_KEYS if key == family_key), None)
+        if _is_free_throw_text(row.get("text")):
+            family_label = "Free Throw"
+        elif not family_label:
+            family_label = "Other"
+        raw_shots_by_team[row_team_id].append(
+            {
+                "play_key": str(row.get("play_key") or row.get("id") or ""),
+                "elapsed_seconds": elapsed_seconds,
+                "period_number": period_number,
+                "period_label": str(row.get("period") or period_number),
+                "athlete_id": str(row.get("athlete_id") or "").strip(),
+                "player_name": _parse_shooter_name(row.get("text"), row.get("athlete_id")),
+                "made": bool(row.get("scoring_play")),
+                "family": family_label,
+                "raw_x": raw_x,
+                "raw_y": raw_y,
+                "text": str(row.get("text") or ""),
+            }
+        )
+
+    normalized_shots_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    normalized_flags: Dict[str, bool] = {}
+    for team_id in team_ids:
+        normalized_shots, normalized_flag = normalize_shot_chart_coordinates(raw_shots_by_team[team_id])
+        normalized_shots_by_team[team_id] = normalized_shots
+        normalized_flags[team_id] = normalized_flag
+
+    summary = get_service().pbp_summary(gid)
+    updated_at = summary.get("updated_at") or now_iso()
+
+    return {
+        "game_id": gid,
+        "updated_at": updated_at,
+        "source_url": summary.get("source_url") or espn_pbp_source_url(ESPN_PBP_LEAGUE, gid),
+        "teams": [
+            {"id": ucsb_id, "label": "UCSB"},
+            *([{"id": opp_id, "label": "Opponent"}] if opp_id else []),
+        ],
+        "latest_elapsed_seconds": latest_elapsed_seconds,
+        "team_cumulative": {
+            "available_metrics": [{"key": key, "label": label} for key, label in GRAPH_COUNTING_METRICS],
+            "default_metric_keys": list(GRAPH_DEFAULT_METRIC_KEYS),
+            "series_by_team": cumulative_points_by_team,
+        },
+        "shot_family_cumulative": {
+            "families": [{"key": key, "label": label} for key, label in SHOT_FAMILY_KEYS],
+            "series_by_team": family_points_by_team,
+        },
+        "shot_chart": {
+            "shots_by_team": normalized_shots_by_team,
+            "normalized_second_half_by_team": normalized_flags,
+        },
+    }
 
 
 def resolve_athlete_name(athlete_id: str) -> str:
@@ -2988,6 +3364,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                     cols = live[key].get("columns", [])
                     live[key]["columns"] = [c for c in cols if c not in hidden]
                 self._send_json(200, live)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/pbp/graphs":
+            try:
+                params = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                ucsb = (params.get("ucsb") or [DEFAULT_UCSB_TEAM_ID])[0] or DEFAULT_UCSB_TEAM_ID
+                opponent = (params.get("opponent") or [""])[0]
+                game_id = (params.get("game_id") or [ESPN_PBP_GAME_ID])[0] or ESPN_PBP_GAME_ID
+                payload = build_pbp_graphs(ucsb_team_id=ucsb, opponent_team_id=opponent or None, game_id=game_id)
+                self._send_json(200, payload)
             except Exception as exc:  # noqa: BLE001
                 self._send_json(500, {"error": str(exc)})
             return

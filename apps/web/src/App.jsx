@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
+import {
   buildPbpFilterQuery,
   canApplyPbpAdvancedFilters,
   DEFAULT_PBP_ADVANCED_FILTERS,
@@ -8,6 +17,16 @@ import {
   pbpAdvancedFiltersEqual,
   validatePbpAdvancedFilters
 } from "./pbpFilters";
+import {
+  DEFAULT_GRAPH_METRIC_KEYS,
+  filterTeamCumulativeMetricOptions,
+  formatElapsedGameTime,
+  graphTeamIdForSide,
+  GRAPH_LINE_COLORS,
+  normalizeSelectedGraphMetrics,
+  SHOT_FAMILY_COLORS,
+  toggleGraphMetric
+} from "./gameGraphs";
 
 function CollapseButton({ panelRef, collapsed, onCollapsedChange, title }) {
   return (
@@ -38,6 +57,15 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 const UCSB_TEAM_ID = "2540";
 const PBP_TEAM_ID = "pbp";
 const HIDDEN_COLUMNS = new Set(["row_key"]);
+const EMPTY_GRAPH_DATA = {
+  teams: [],
+  latest_elapsed_seconds: 0,
+  team_cumulative: { available_metrics: [], default_metric_keys: DEFAULT_GRAPH_METRIC_KEYS, series_by_team: {} },
+  shot_family_cumulative: { families: [], series_by_team: {} },
+  shot_chart: { shots_by_team: {}, normalized_second_half_by_team: {} },
+  updated_at: "",
+  source_url: ""
+};
 
 const SEASON_PER_GAME_COLUMNS = new Set([
   "MIN", "PTS", "REB", "AST", "TO", "STL", "BLK", "PF",
@@ -421,6 +449,63 @@ function InsightBubble({ insight, onSave, onEvidenceClick, saveText, resolveTeam
   );
 }
 
+function GraphCard({ title, controls = null, className = "", children }) {
+  return (
+    <section className={`graph-card ${className}`.trim()}>
+      <header className="graph-card-header">
+        <h3>{title}</h3>
+        {controls}
+      </header>
+      <div className="graph-card-body">{children}</div>
+    </section>
+  );
+}
+
+function GraphLegend({ items = [] }) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <div className="graph-legend" aria-label="Chart legend">
+      {items.map((item) => (
+        <div key={item.key} className="graph-legend-item">
+          <span
+            className={`graph-legend-swatch ${item.kind === "dot" ? "dot" : "line"} ${item.dashed ? "dashed" : ""}`.trim()}
+            style={{ "--legend-color": item.color, "--legend-opacity": item.opacity ?? 1 }}
+            aria-hidden="true"
+          />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GraphSeriesTooltip({ active, label, payload }) {
+  if (!active || !payload?.length) {
+    return null;
+  }
+  const rows = payload.filter((entry) => entry?.value != null);
+  if (!rows.length) {
+    return null;
+  }
+  return (
+    <div className="graph-tooltip">
+      <strong>Elapsed {formatElapsedGameTime(label)}</strong>
+      {rows.map((entry) => (
+        <div key={entry.dataKey} className="graph-tooltip-row">
+          <span
+            className={`graph-tooltip-swatch ${entry.strokeDasharray ? "dashed" : ""}`.trim()}
+            style={{ "--tooltip-color": entry.color }}
+            aria-hidden="true"
+          />
+          <span>{entry.name || entry.dataKey}: {entry.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [activeSeasonSide, setActiveSeasonSide] = useState("ucsb");
   const [seasonDataCollapsed, setSeasonDataCollapsed] = useState(false);
@@ -490,6 +575,11 @@ export default function App() {
     ucsb: { ...DEFAULT_TABLE_STATE },
     opponent: { ...DEFAULT_TABLE_STATE }
   });
+  const [graphData, setGraphData] = useState(() => ({ ...EMPTY_GRAPH_DATA }));
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphError, setGraphError] = useState("");
+  const [selectedGraphMetrics, setSelectedGraphMetrics] = useState([...DEFAULT_GRAPH_METRIC_KEYS]);
+  const [graphShowAttempts, setGraphShowAttempts] = useState(false);
   const [liveColorStartPctDeviation, setLiveColorStartPctDeviation] = useState(0.5);
   const [liveColorCapPctDeviation, setLiveColorCapPctDeviation] = useState(1.0);
   const [minPctColorAttempts, setMinPctColorAttempts] = useState(5);
@@ -744,6 +834,38 @@ export default function App() {
     }
   }, [pbpLoading, pbpError, loadLiveStats]);
 
+  const loadGraphs = useCallback(async () => {
+    setGraphLoading(true);
+    setGraphError("");
+    const ucsb = encodeURIComponent(UCSB_TEAM_ID);
+    const opponent = normalizedOpponentTeamId ? encodeURIComponent(normalizedOpponentTeamId) : "";
+    const gameId = encodeURIComponent(pbpGameId);
+    const url = `${API_BASE}/api/pbp/graphs?ucsb=${ucsb}${opponent ? `&opponent=${opponent}` : ""}&game_id=${gameId}`;
+    try {
+      const payload = await fetchJson(url, {}, 1);
+      setGraphData({
+        teams: payload.teams || [],
+        latest_elapsed_seconds: payload.latest_elapsed_seconds || 0,
+        team_cumulative: payload.team_cumulative || EMPTY_GRAPH_DATA.team_cumulative,
+        shot_family_cumulative: payload.shot_family_cumulative || EMPTY_GRAPH_DATA.shot_family_cumulative,
+        shot_chart: payload.shot_chart || EMPTY_GRAPH_DATA.shot_chart,
+        updated_at: payload.updated_at || "",
+        source_url: payload.source_url || ""
+      });
+    } catch (error) {
+      setGraphError(error.message);
+      setGraphData({ ...EMPTY_GRAPH_DATA });
+    } finally {
+      setGraphLoading(false);
+    }
+  }, [normalizedOpponentTeamId, pbpGameId]);
+
+  useEffect(() => {
+    if (!pbpLoading && !pbpError) {
+      loadGraphs();
+    }
+  }, [pbpLoading, pbpError, loadGraphs]);
+
   const updatePbp = useCallback(async () => {
     setPbpUpdating(true);
     setPbpError("");
@@ -920,6 +1042,10 @@ export default function App() {
   const opponentDisplayName = teamNameById[normalizedOpponentTeamId] || normalizedOpponentTeamId || "Opponent";
   const activeSeasonName = activeSeasonSide === "ucsb" ? ucsbDisplayName : opponentDisplayName;
   const activeLivePrefix = activeLiveSide === "ucsb" ? "ucsb" : "opponent";
+  const activeGraphTeamId = useMemo(
+    () => graphTeamIdForSide(activeLiveSide, UCSB_TEAM_ID, normalizedOpponentTeamId, graphData.teams),
+    [activeLiveSide, normalizedOpponentTeamId, graphData.teams]
+  );
   const seasonDataByTeamId = useMemo(() => {
     const source = hasActiveFilters ? filteredSeasonPlayers : seasonPlayers;
     const map = {};
@@ -945,6 +1071,61 @@ export default function App() {
   const activeSeasonPlayersTableState = seasonPlayersTableState[activeSeasonSide];
   const livePlayersData = liveStats[`${activeLivePrefix}_players`] || { columns: [], rows: [] };
   const activeLivePlayersTableState = livePlayersTableState[activeLiveSide];
+  const graphMetricOptions = useMemo(
+    () => filterTeamCumulativeMetricOptions(graphData.team_cumulative?.available_metrics || []),
+    [graphData.team_cumulative?.available_metrics]
+  );
+  const graphMetricKeys = useMemo(() => graphMetricOptions.map((metric) => metric.key), [graphMetricOptions]);
+  const graphMetricLabelByKey = useMemo(
+    () =>
+      Object.fromEntries(
+        graphMetricOptions.map((metric) => [metric.key, metric.label || metric.key])
+      ),
+    [graphMetricOptions]
+  );
+  const normalizedGraphMetrics = useMemo(
+    () => normalizeSelectedGraphMetrics(selectedGraphMetrics, graphMetricKeys),
+    [selectedGraphMetrics, graphMetricKeys]
+  );
+  const activeTeamCumulativeSeries = graphData.team_cumulative?.series_by_team?.[activeGraphTeamId] || [];
+  const activeShotFamilySeries = graphData.shot_family_cumulative?.series_by_team?.[activeGraphTeamId] || [];
+  const teamCumulativeLegendItems = useMemo(
+    () =>
+      normalizedGraphMetrics.map((metricKey, index) => ({
+        key: metricKey,
+        label: graphMetricLabelByKey[metricKey] || metricKey,
+        color: GRAPH_LINE_COLORS[index % GRAPH_LINE_COLORS.length],
+        kind: "line"
+      })),
+    [graphMetricLabelByKey, normalizedGraphMetrics]
+  );
+  const shotFamilyLegendItems = useMemo(
+    () =>
+      graphData.shot_family_cumulative.families.flatMap((family) => {
+        const color = SHOT_FAMILY_COLORS[family.key] || GRAPH_LINE_COLORS[0];
+        const baseItem = {
+          key: `${family.key}-made`,
+          label: `${family.label} Made`,
+          color,
+          kind: "line"
+        };
+        if (!graphShowAttempts) {
+          return [baseItem];
+        }
+        return [
+          baseItem,
+          {
+            key: `${family.key}-attempts`,
+            label: `${family.label} Att`,
+            color,
+            kind: "line",
+            dashed: true,
+            opacity: 0.65
+          }
+        ];
+      }),
+    [graphData.shot_family_cumulative.families, graphShowAttempts]
+  );
   const liveColorCapMin = useMemo(
     () => Math.min(2, Math.max(0.5, Number((liveColorStartPctDeviation + 0.05).toFixed(2)))),
     [liveColorStartPctDeviation]
@@ -963,6 +1144,12 @@ export default function App() {
       setLiveColorCapPctDeviation(liveColorCapMin);
     }
   }, [liveColorCapPctDeviation, liveColorCapMin]);
+
+  useEffect(() => {
+    if (JSON.stringify(selectedGraphMetrics) !== JSON.stringify(normalizedGraphMetrics)) {
+      setSelectedGraphMetrics(normalizedGraphMetrics);
+    }
+  }, [selectedGraphMetrics, normalizedGraphMetrics]);
 
   const handleLiveColorStartChange = useCallback((event) => {
     const nextStart = Number.parseFloat(event.target.value);
@@ -1446,6 +1633,13 @@ export default function App() {
                 >
                   Play-by-Play
                 </button>
+                <button
+                  type="button"
+                  className={gameDataSubtab === "graphs" ? "active" : ""}
+                  onClick={() => setGameDataSubtab("graphs")}
+                >
+                  Graphs
+                </button>
               </div>
               <div className="panel-header-actions">
                 <label>
@@ -1570,6 +1764,165 @@ export default function App() {
                   }
                   showBaseControls={false}
                 />
+              </>
+            ) : gameDataSubtab === "graphs" ? (
+              <>
+                <div className="tab-tree graphs-tree">
+                  <div className="branch">
+                    <h3>Team View</h3>
+                    <div className="leaf-list">
+                      <button type="button" className={`leaf ${activeLiveSide === "ucsb" ? "active" : ""}`} onClick={() => setActiveLiveSide("ucsb")}>
+                        UCSB
+                      </button>
+                      <button
+                        type="button"
+                        className={`leaf ${activeLiveSide === "opponent" ? "active" : ""}`}
+                        onClick={() => setActiveLiveSide("opponent")}
+                        disabled={!normalizedOpponentTeamId}
+                      >
+                        Opponent
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="table-status">
+                  {graphLoading ? <span> Loading graphs...</span> : null}
+                  {graphError ? <span className="error"> {graphError}</span> : null}
+                  {!pbpData.rows.length ? (
+                    <span> Graphs are derived from play-by-play data. Click Update above to fetch PBP first.</span>
+                  ) : null}
+                  {!graphLoading && !graphError && graphData.source_url ? (
+                    <span>
+                      {" "}
+                      Source:{" "}
+                      <a href={graphData.source_url} target="_blank" rel="noreferrer">
+                        ESPN Core API
+                      </a>
+                    </span>
+                  ) : null}
+                </div>
+                <div className="graphs-layout">
+                  <GraphCard
+                    title="Team Cumulative Performance"
+                    controls={
+                      <div className="graph-metric-pills">
+                        {graphMetricOptions.map((metric, index) => (
+                          <button
+                            type="button"
+                            key={metric.key}
+                            className={normalizedGraphMetrics.includes(metric.key) ? "active" : ""}
+                            style={normalizedGraphMetrics.includes(metric.key) ? { borderColor: GRAPH_LINE_COLORS[index % GRAPH_LINE_COLORS.length] } : undefined}
+                            onClick={() => setSelectedGraphMetrics((prev) => toggleGraphMetric(prev, metric.key))}
+                          >
+                            {metric.key}
+                          </button>
+                        ))}
+                      </div>
+                    }
+                  >
+                    {activeTeamCumulativeSeries.length && normalizedGraphMetrics.length ? (
+                      <>
+                        <div className="chart-frame">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={activeTeamCumulativeSeries} margin={{ top: 12, right: 20, bottom: 16, left: 8 }}>
+                              <CartesianGrid stroke="#dfe4d2" strokeDasharray="3 3" />
+                              <XAxis
+                                dataKey="elapsed_seconds"
+                                type="number"
+                                domain={[0, graphData.latest_elapsed_seconds || "dataMax"]}
+                                tickFormatter={formatElapsedGameTime}
+                                minTickGap={24}
+                                tickMargin={8}
+                              />
+                              <YAxis allowDecimals={false} width={42} tickMargin={8} />
+                              <Tooltip content={<GraphSeriesTooltip />} allowEscapeViewBox={{ x: false, y: false }} />
+                              {normalizedGraphMetrics.map((metricKey, index) => (
+                                <Line
+                                  key={metricKey}
+                                  type="stepAfter"
+                                  dataKey={metricKey}
+                                  name={graphMetricLabelByKey[metricKey] || metricKey}
+                                  stroke={GRAPH_LINE_COLORS[index % GRAPH_LINE_COLORS.length]}
+                                  strokeWidth={2}
+                                  dot={false}
+                                />
+                              ))}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <GraphLegend items={teamCumulativeLegendItems} />
+                      </>
+                    ) : (
+                      <div className="graph-empty">Select at least one metric to display this chart.</div>
+                    )}
+                  </GraphCard>
+
+                  <GraphCard
+                    title="Shot-Type Cumulative"
+                    controls={
+                      <label className="graph-toggle">
+                        <input
+                          type="checkbox"
+                          checked={graphShowAttempts}
+                          onChange={(event) => setGraphShowAttempts(event.target.checked)}
+                        />
+                        Show attempts overlay
+                      </label>
+                    }
+                  >
+                    {activeShotFamilySeries.length ? (
+                      <>
+                        <div className="chart-frame">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={activeShotFamilySeries} margin={{ top: 12, right: 20, bottom: 16, left: 8 }}>
+                              <CartesianGrid stroke="#dfe4d2" strokeDasharray="3 3" />
+                              <XAxis
+                                dataKey="elapsed_seconds"
+                                type="number"
+                                domain={[0, graphData.latest_elapsed_seconds || "dataMax"]}
+                                tickFormatter={formatElapsedGameTime}
+                                minTickGap={24}
+                                tickMargin={8}
+                              />
+                              <YAxis allowDecimals={false} width={42} tickMargin={8} />
+                              <Tooltip content={<GraphSeriesTooltip />} allowEscapeViewBox={{ x: false, y: false }} />
+                              {graphData.shot_family_cumulative.families.map((family) => (
+                                <Line
+                                  key={`${family.key}_M`}
+                                  type="stepAfter"
+                                  dataKey={`${family.key}_M`}
+                                  name={`${family.label} Made`}
+                                  stroke={SHOT_FAMILY_COLORS[family.key] || GRAPH_LINE_COLORS[0]}
+                                  strokeWidth={2}
+                                  dot={false}
+                                />
+                              ))}
+                              {graphShowAttempts
+                                ? graphData.shot_family_cumulative.families.map((family) => (
+                                    <Line
+                                      key={`${family.key}_A`}
+                                      type="stepAfter"
+                                      dataKey={`${family.key}_A`}
+                                      name={`${family.label} Att`}
+                                      stroke={SHOT_FAMILY_COLORS[family.key] || GRAPH_LINE_COLORS[0]}
+                                      strokeWidth={1.5}
+                                      strokeDasharray="5 4"
+                                      strokeOpacity={0.55}
+                                      dot={false}
+                                    />
+                                  ))
+                                : null}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <GraphLegend items={shotFamilyLegendItems} />
+                      </>
+                    ) : (
+                      <div className="graph-empty">No shot-type series are available for this team yet.</div>
+                    )}
+                  </GraphCard>
+
+                </div>
               </>
             ) : (
               <>

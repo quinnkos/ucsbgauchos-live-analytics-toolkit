@@ -6,5 +6,6 @@ cd "$repo_root"
 
 bash scripts/ensure-web.sh
 node apps/web/tests/evidenceNavigation.test.mjs
+node apps/web/tests/graphsSubtab.test.mjs
 node apps/web/tests/pbpAdvancedFilters.test.mjs
 node apps/web/tests/seasonFiltersAndPeriodScope.test.mjs

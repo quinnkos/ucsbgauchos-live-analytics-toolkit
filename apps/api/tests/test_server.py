@@ -6,10 +6,13 @@ from apps.api.server import (
     _extract_team_stat_rows,
     _call_openai_chat,
     apply_pbp_filters,
+    build_pbp_graphs,
     canonicalize_insights_payload,
     build_live_stats_from_pbp,
     dataset_filename,
+    elapsed_game_seconds,
     generate_insights,
+    normalize_shot_chart_coordinates,
     normalize_dataset_name,
     normalize_team_id,
     openai_schema,
@@ -487,6 +490,228 @@ class LiveStatsPeriodScopeTests(unittest.TestCase):
         self.assertEqual(pts_1st["value"], "2")
         self.assertEqual(pts_2nd["value"], "3")
         self.assertEqual(pts_full["value"], "5")
+
+
+class GraphPayloadTests(unittest.TestCase):
+    def test_elapsed_game_seconds_spans_halves(self) -> None:
+        period_lengths = {1: 1200, 2: 1200}
+        self.assertEqual(elapsed_game_seconds({"period_number": 1, "clock_seconds": 1200}, period_lengths), 0)
+        self.assertEqual(elapsed_game_seconds({"period_number": 1, "clock_seconds": 900}, period_lengths), 300)
+        self.assertEqual(elapsed_game_seconds({"period_number": 2, "clock_seconds": 1200}, period_lengths), 1200)
+        self.assertEqual(elapsed_game_seconds({"period_number": 2, "clock_seconds": 1185}, period_lengths), 1215)
+
+    def test_build_pbp_graphs_accumulates_counting_metrics(self) -> None:
+        raw_rows = [
+            {
+                "id": "1",
+                "play_key": "play_1",
+                "sequence": 1,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1190,
+                "team_id": "2540",
+                "type": "LayUpShot",
+                "text": "Aidan Mahaney made Layup. Assisted by Colin Smith.",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 2,
+                "points_attempted": 2,
+                "athlete_id": "11",
+                "assist_athlete_id": "22",
+                "raw_payload": "{\"coordinate\": {\"x\": 26, \"y\": 2}}",
+            },
+            {
+                "id": "2",
+                "play_key": "play_2",
+                "sequence": 2,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1180,
+                "team_id": "2540",
+                "type": "Defensive Rebound",
+                "text": "Colin Smith defensive rebound",
+                "scoring_play": False,
+                "shooting_play": False,
+                "score_value": 0,
+                "points_attempted": 0,
+                "athlete_id": "22",
+                "assist_athlete_id": "",
+                "raw_payload": "{}",
+            },
+            {
+                "id": "3",
+                "play_key": "play_3",
+                "sequence": 3,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1170,
+                "team_id": "2540",
+                "type": "Turnover",
+                "text": "Lost ball turnover",
+                "scoring_play": False,
+                "shooting_play": False,
+                "score_value": 0,
+                "points_attempted": 0,
+                "athlete_id": "11",
+                "assist_athlete_id": "",
+                "raw_payload": "{}",
+            },
+        ]
+        with patch("apps.api.server.load_pbp_graph_rows", return_value=raw_rows):
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.pbp_summary.return_value = {
+                    "updated_at": "2026-03-07T10:00:00Z",
+                    "source_url": "https://example.test/pbp",
+                }
+                payload = build_pbp_graphs(ucsb_team_id="2540", opponent_team_id="300", game_id="game-1")
+        last_point = payload["team_cumulative"]["series_by_team"]["2540"][-1]
+        self.assertEqual(last_point["PTS"], 2)
+        self.assertEqual(last_point["REB"], 1)
+        self.assertEqual(last_point["AST"], 1)
+        self.assertEqual(last_point["TO"], 1)
+        self.assertEqual(
+            [metric["key"] for metric in payload["team_cumulative"]["available_metrics"]],
+            ["PTS", "REB", "AST", "TO", "STL", "BLK", "PF"],
+        )
+
+    def test_build_pbp_graphs_team_metric_options_exclude_shot_family_metrics(self) -> None:
+        with patch("apps.api.server.load_pbp_graph_rows", return_value=[]):
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.pbp_summary.return_value = {
+                    "updated_at": "2026-03-07T10:00:00Z",
+                    "source_url": "https://example.test/pbp",
+                }
+                payload = build_pbp_graphs(ucsb_team_id="2540", opponent_team_id="300", game_id="game-1")
+
+        metric_keys = [metric["key"] for metric in payload["team_cumulative"]["available_metrics"]]
+        self.assertNotIn("MIDR_M", metric_keys)
+        self.assertNotIn("MIDR_A", metric_keys)
+        self.assertNotIn("LAYUP_M", metric_keys)
+        self.assertNotIn("LAYUP_A", metric_keys)
+        self.assertNotIn("DUNKS", metric_keys)
+        self.assertNotIn("TIPS", metric_keys)
+        self.assertNotIn("FGM", metric_keys)
+        self.assertNotIn("FGA", metric_keys)
+        self.assertNotIn("3PM", metric_keys)
+        self.assertNotIn("3PA", metric_keys)
+        self.assertNotIn("FTM", metric_keys)
+        self.assertNotIn("FTA", metric_keys)
+
+    def test_build_pbp_graphs_accumulates_shot_families(self) -> None:
+        raw_rows = [
+            {
+                "id": "1",
+                "play_key": "play_1",
+                "sequence": 1,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1180,
+                "team_id": "2540",
+                "type": "LayUpShot",
+                "text": "Aidan Mahaney made Layup.",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 2,
+                "points_attempted": 2,
+                "athlete_id": "11",
+                "assist_athlete_id": "",
+                "raw_payload": "{\"coordinate\": {\"x\": 27, \"y\": 2}}",
+            },
+            {
+                "id": "2",
+                "play_key": "play_2",
+                "sequence": 2,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1170,
+                "team_id": "2540",
+                "type": "JumpShot",
+                "text": "Colin Smith made Jumper.",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 2,
+                "points_attempted": 2,
+                "athlete_id": "22",
+                "assist_athlete_id": "",
+                "raw_payload": "{\"coordinate\": {\"x\": 18, \"y\": 12}}",
+            },
+            {
+                "id": "3",
+                "play_key": "play_3",
+                "sequence": 3,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1160,
+                "team_id": "2540",
+                "type": "JumpShot",
+                "text": "Colin Smith missed Three Point Jumper.",
+                "scoring_play": False,
+                "shooting_play": True,
+                "score_value": 0,
+                "points_attempted": 3,
+                "athlete_id": "22",
+                "assist_athlete_id": "",
+                "raw_payload": "{\"coordinate\": {\"x\": 8, \"y\": 19}}",
+            },
+            {
+                "id": "4",
+                "play_key": "play_4",
+                "sequence": 4,
+                "period_number": 1,
+                "period": "1st Half",
+                "clock_seconds": 1150,
+                "team_id": "2540",
+                "type": "DunkShot",
+                "text": "Hosana Kitenge missed Dunk.",
+                "scoring_play": False,
+                "shooting_play": True,
+                "score_value": 0,
+                "points_attempted": 2,
+                "athlete_id": "33",
+                "assist_athlete_id": "",
+                "raw_payload": "{\"coordinate\": {\"x\": 26, \"y\": 1}}",
+            },
+        ]
+        with patch("apps.api.server.load_pbp_graph_rows", return_value=raw_rows):
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.pbp_summary.return_value = {
+                    "updated_at": "2026-03-07T10:00:00Z",
+                    "source_url": "https://example.test/pbp",
+                }
+                payload = build_pbp_graphs(ucsb_team_id="2540", opponent_team_id="300", game_id="game-1")
+        last_point = payload["shot_family_cumulative"]["series_by_team"]["2540"][-1]
+        self.assertEqual(last_point["FG_M"], 2)
+        self.assertEqual(last_point["FG_A"], 4)
+        self.assertEqual(last_point["3PT_M"], 0)
+        self.assertEqual(last_point["3PT_A"], 1)
+        self.assertEqual(last_point["LAYUP_M"], 1)
+        self.assertEqual(last_point["LAYUP_A"], 1)
+        self.assertEqual(last_point["MIDRANGE_M"], 1)
+        self.assertEqual(last_point["MIDRANGE_A"], 1)
+        self.assertEqual(last_point["DUNK_A"], 1)
+
+    def test_normalize_shot_chart_coordinates_rotates_second_half(self) -> None:
+        shots = [
+            {
+                "play_key": "play_1",
+                "period_number": 1,
+                "family": "Layups",
+                "raw_x": 26.0,
+                "raw_y": 3.0,
+            },
+            {
+                "play_key": "play_2",
+                "period_number": 2,
+                "family": "Layups",
+                "raw_x": 20.0,
+                "raw_y": 42.0,
+            },
+        ]
+        normalized, did_normalize = normalize_shot_chart_coordinates(shots)
+        self.assertTrue(did_normalize)
+        self.assertEqual(normalized[1]["chart_x"], 30.0)
+        self.assertEqual(normalized[1]["chart_y"], 5.0)
+        self.assertTrue(normalized[1]["normalized"])
 
 
 class PbpAdvancedFilterTests(unittest.TestCase):
