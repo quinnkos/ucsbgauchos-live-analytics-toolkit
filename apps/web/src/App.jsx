@@ -31,18 +31,6 @@ function CollapseButton({ panelRef, collapsed, onCollapsedChange, title }) {
   );
 }
 
-function InfoTooltipButton({ text, label = "Info" }) {
-  return (
-    <span className="info-tooltip">
-      <button type="button" className="neutral" aria-label="Season scope information">
-        {label}
-      </button>
-      <span className="info-tooltip-bubble" role="tooltip">
-        {text}
-      </span>
-    </span>
-  );
-}
 import { evidenceLabel, resolveEvidenceTarget } from "./evidenceNavigation";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -262,7 +250,16 @@ function formatInsightErrorMessage(error) {
   return message;
 }
 
-function DataTable({ columns, rows, state, onChange, extraControls = null, cellColorFn = null, rowStyleFn = null }) {
+function DataTable({
+  columns,
+  rows,
+  state,
+  onChange,
+  extraControls = null,
+  cellColorFn = null,
+  rowStyleFn = null,
+  showBaseControls = true
+}) {
   const rowRefs = useRef({});
 
   const sortedRows = useMemo(() => {
@@ -312,38 +309,44 @@ function DataTable({ columns, rows, state, onChange, extraControls = null, cellC
 
   return (
     <div className="table-shell">
-      <div className="table-controls">
-        <input
-          type="text"
-          value={state.filter}
-          placeholder="Filter rows"
-          onChange={(event) => onChange({ filter: event.target.value })}
-        />
-        <select
-          value={state.sortColumn}
-          onChange={(event) => onChange({ sortColumn: event.target.value })}
-        >
-          <option value="">Sort by</option>
-          {columns.map((column) => (
-            <option value={column} key={column}>
-              {column}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => onChange({ sortDirection: state.sortDirection === "asc" ? "desc" : "asc" })}
-          disabled={!state.sortColumn}
-        >
-          {state.sortDirection === "asc" ? "Asc" : "Desc"}
-        </button>
-        {state.forcedRowKey ? (
-          <button type="button" className="neutral" onClick={() => onChange({ forcedRowKey: "", highlightRowKey: "" })}>
-            Clear evidence focus
-          </button>
-        ) : null}
-        {extraControls}
-      </div>
+      {showBaseControls || extraControls ? (
+        <div className="table-controls">
+          {showBaseControls ? (
+            <>
+              <input
+                type="text"
+                value={state.filter}
+                placeholder="Filter rows"
+                onChange={(event) => onChange({ filter: event.target.value })}
+              />
+              <select
+                value={state.sortColumn}
+                onChange={(event) => onChange({ sortColumn: event.target.value })}
+              >
+                <option value="">Sort by</option>
+                {columns.map((column) => (
+                  <option value={column} key={column}>
+                    {column}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => onChange({ sortDirection: state.sortDirection === "asc" ? "desc" : "asc" })}
+                disabled={!state.sortColumn}
+              >
+                {state.sortDirection === "asc" ? "Asc" : "Desc"}
+              </button>
+              {state.forcedRowKey ? (
+                <button type="button" className="neutral" onClick={() => onChange({ forcedRowKey: "", highlightRowKey: "" })}>
+                  Clear evidence focus
+                </button>
+              ) : null}
+            </>
+          ) : null}
+          {extraControls}
+        </div>
+      ) : null}
 
       <div className="table-scroll">
         <table>
@@ -1277,7 +1280,6 @@ export default function App() {
               <>
             <div className="section-header">
               <h2>Season Data</h2>
-              <InfoTooltipButton text="Season: 2025-2026 Regular Season only. Scope: UCSB plus opponents on UCSB's schedule only." label="(i)" />
               <span>Viewing: {activeSeasonName}</span>
               <CollapseButton
                 panelRef={seasonDataPanelRef}
@@ -1306,12 +1308,6 @@ export default function App() {
                 <div className="team-line opponent-line">
                   {espnTeams.length > 0 ? (
                     <>
-                      <input
-                        type="text"
-                        value={teamSearch}
-                        placeholder="Search opponent"
-                        onChange={(event) => setTeamSearch(event.target.value)}
-                      />
                       <select value={normalizedOpponentTeamId} onChange={(event) => setOpponentTeamId(event.target.value)}>
                         <option value="">Select schedule opponent</option>
                         {groupedOpponents.map(([conferenceName, teams]) => (
@@ -1408,6 +1404,7 @@ export default function App() {
                   </div>
                 </>
               }
+              showBaseControls={false}
             />
               </>
             )}
@@ -1571,6 +1568,7 @@ export default function App() {
                       </div>
                     </>
                   }
+                  showBaseControls={false}
                 />
               </>
             ) : (

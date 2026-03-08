@@ -36,8 +36,8 @@ const appSource = readFileSync(resolve("apps/web/src/App.jsx"), "utf8");
 {
   assert.equal(
     appSource.includes('label="(i)"'),
-    true,
-    "Info button should use (i) label"
+    false,
+    "Season Data info button should be removed"
   );
 }
 

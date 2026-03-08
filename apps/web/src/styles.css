@@ -204,12 +204,12 @@ body,
 }
 
 .tab-tree {
-  padding: 12px 14px;
+  padding: 10px 14px 8px;
   border-bottom: 1px solid var(--line);
 }
 
 .branch h3 {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 0.93rem;
 }
 
@@ -281,7 +281,20 @@ body,
 .leaf-list {
   display: flex;
   gap: 8px;
+  margin-top: 6px;
+}
+
+.branch .opponent-line {
   margin-top: 8px;
+}
+
+.opponent-line select {
+  min-width: 260px;
+  flex: 1 1 260px;
+}
+
+.opponent-line button {
+  flex-shrink: 0;
 }
 
 button,
@@ -346,7 +359,7 @@ textarea {
 
 .table-status {
   min-height: 24px;
-  padding: 8px 14px 0;
+  padding: 6px 14px 0;
   font-size: 0.85rem;
 }
 
@@ -651,7 +664,8 @@ tbody tr.highlighted > td {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 12px;
+  align-items: center;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -659,12 +673,12 @@ tbody tr.highlighted > td {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   color: var(--muted);
 }
 
 .season-filter-select select {
-  min-width: 210px;
+  min-width: 220px;
 }
 
 .table-empty {
