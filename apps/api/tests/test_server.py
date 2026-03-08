@@ -444,6 +444,51 @@ class LiveStatsRegressionTests(unittest.TestCase):
         self.assertEqual(minutes_by_player["Team"], "30.0")
 
 
+class LiveStatsPeriodScopeTests(unittest.TestCase):
+    def test_live_stats_period_scope_filters_rows(self) -> None:
+        raw_rows = [
+            {
+                "team_id": "2540",
+                "type": "Made Shot",
+                "text": "Made Jumper",
+                "period": "1st Half",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 2,
+                "points_attempted": 2,
+                "athlete_id": "11",
+                "assist_athlete_id": "",
+            },
+            {
+                "team_id": "2540",
+                "type": "Made Shot",
+                "text": "Made Three",
+                "period": "2nd Half",
+                "scoring_play": True,
+                "shooting_play": True,
+                "score_value": 3,
+                "points_attempted": 3,
+                "athlete_id": "11",
+                "assist_athlete_id": "",
+            },
+        ]
+        with patch("apps.api.server.load_pbp_rows", return_value=raw_rows):
+            with patch("apps.api.server.get_service") as mock_service:
+                mock_service.return_value.player_seconds_for_game.return_value = {
+                    "2540": {"11": 600}
+                }
+                live_1st = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300", period_scope="1st")
+                live_2nd = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300", period_scope="2nd")
+                live_full = build_live_stats_from_pbp(ucsb_team_id="2540", opponent_team_id="300", period_scope="full")
+
+        pts_1st = next(r for r in live_1st["ucsb_team"]["rows"] if r["stat_key"] == "pts")
+        pts_2nd = next(r for r in live_2nd["ucsb_team"]["rows"] if r["stat_key"] == "pts")
+        pts_full = next(r for r in live_full["ucsb_team"]["rows"] if r["stat_key"] == "pts")
+        self.assertEqual(pts_1st["value"], "2")
+        self.assertEqual(pts_2nd["value"], "3")
+        self.assertEqual(pts_full["value"], "5")
+
+
 class PbpAdvancedFilterTests(unittest.TestCase):
     def test_parse_pbp_filters_back_compat_empty(self) -> None:
         parsed = parse_pbp_filters({})

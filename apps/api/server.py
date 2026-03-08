@@ -20,6 +20,8 @@ from .local_first import (
     ROOT_TEAM_ID,
     field_goal_breakdown_metrics,
     get_service,
+    normalize_period_scope,
+    normalize_season_filter_mode,
     player_display_row,
 )
 
@@ -1806,11 +1808,16 @@ def build_live_stats_from_pbp(
     ucsb_team_id: Optional[str] = None,
     opponent_team_id: Optional[str] = None,
     game_id: Optional[str] = None,
+    period_scope: str = "full",
 ) -> Dict[str, Any]:
     """Build four datasets (ucsb_team, ucsb_players, opponent_team, opponent_players) from PBP only."""
     gid = (game_id or ESPN_PBP_GAME_ID).strip()
+    normalized_scope = normalize_period_scope(period_scope)
     rows = load_pbp_rows(game_id=gid)
-    player_seconds = get_service().player_seconds_for_game(gid)
+    if normalized_scope in {"1st", "2nd"}:
+        target = "1" if normalized_scope == "1st" else "2"
+        rows = [r for r in rows if str(r.get("period", "")).lstrip().startswith(target)]
+    player_seconds = get_service().player_seconds_for_game(gid, period_scope=normalized_scope)
     ucsb_id = _normalize_team_id_safe(ucsb_team_id or DEFAULT_UCSB_TEAM_ID) or normalize_team_id(DEFAULT_UCSB_TEAM_ID)
     team_ids_in_pbp = set()
     for r in rows:
@@ -2386,7 +2393,14 @@ def _apply_player_column_config(context: Dict[str, Any]) -> None:
     context["rows_by_key"] = {row.get("row_key", ""): row for row in rows}
 
 
-def build_dataset_context(team_id: str, dataset: str) -> Dict[str, Any]:
+def build_dataset_context(
+    team_id: str,
+    dataset: str,
+    *,
+    filter_mode: str = "all",
+    opponent_team_id: str = "",
+    period_scope: str = "full",
+) -> Dict[str, Any]:
     canonical_dataset = normalize_dataset_name(dataset)
     if canonical_dataset == "pbp":
         return build_pbp_context(team_id or "pbp")
@@ -2395,7 +2409,12 @@ def build_dataset_context(team_id: str, dataset: str) -> Dict[str, Any]:
     service = get_service()
 
     if canonical_dataset == "players":
-        payload = service.player_dataset(team_id)
+        payload = service.player_dataset(
+            team_id,
+            filter_mode=filter_mode,
+            opponent_team_id=opponent_team_id,
+            period_scope=period_scope,
+        )
         return {
             "team_id": team_id,
             "dataset": canonical_dataset,
@@ -2891,8 +2910,17 @@ class ApiHandler(BaseHTTPRequestHandler):
                 dataset = "players" if dataset_raw in {"player", "players"} else normalize_dataset_name(dataset_raw)
                 if dataset == "pbp":
                     raise ValueError("Use /api/pbp for play-by-play dataset")
-
-                context = build_dataset_context(team_id, dataset)
+                query = parse_qs(urlparse(self.path).query)
+                filter_mode = normalize_season_filter_mode((query.get("filter") or ["all"])[0])
+                opponent_team_id = (query.get("opponent_team_id") or [""])[0]
+                period_scope = normalize_period_scope((query.get("period_scope") or ["full"])[0])
+                context = build_dataset_context(
+                    team_id,
+                    dataset,
+                    filter_mode=filter_mode,
+                    opponent_team_id=opponent_team_id,
+                    period_scope=period_scope,
+                )
                 school_name = context.get("school_name") or team_id
                 hidden_columns = {"row_key"}
                 visible_columns = [column for column in context["columns"] if column not in hidden_columns]
@@ -2953,7 +2981,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ucsb = params.get("ucsb", DEFAULT_UCSB_TEAM_ID)
                 opponent = params.get("opponent", "")
                 game_id = params.get("game_id") or ESPN_PBP_GAME_ID
-                live = build_live_stats_from_pbp(ucsb_team_id=ucsb, opponent_team_id=opponent or None, game_id=game_id)
+                period_scope = params.get("period_scope", "full")
+                live = build_live_stats_from_pbp(ucsb_team_id=ucsb, opponent_team_id=opponent or None, game_id=game_id, period_scope=period_scope)
                 hidden = {"row_key"}
                 for key in ("ucsb_team", "ucsb_players", "opponent_team", "opponent_players"):
                     cols = live[key].get("columns", [])

@@ -454,6 +454,14 @@ export default function App() {
   });
 
   const [seasonStatMode, setSeasonStatMode] = useState("pergame");
+  const [periodScope, setPeriodScope] = useState("full");
+  const [seasonFilterMode, setSeasonFilterMode] = useState("all");
+  const [filteredSeasonPlayers, setFilteredSeasonPlayers] = useState({
+    ucsb: { columns: [], rows: [] },
+    opponent: { columns: [], rows: [] }
+  });
+  const [filteredSeasonLoading, setFilteredSeasonLoading] = useState({ ucsb: false, opponent: false });
+  const [filteredSeasonError, setFilteredSeasonError] = useState({ ucsb: "", opponent: "" });
 
   const [pbpData, setPbpData] = useState({ columns: [], rows: [], team_id: PBP_TEAM_ID, updated_at: "", source_url: "" });
   const [pbpGameId, setPbpGameId] = useState("401809115");
@@ -615,6 +623,56 @@ export default function App() {
     loadSeasonPlayers("opponent", normalizedOpponentTeamId);
   }, [loadSeasonPlayers, normalizedOpponentTeamId]);
 
+  const hasActiveFilters = seasonFilterMode !== "all" || periodScope !== "full";
+
+  const loadFilteredSeasonPlayers = useCallback(async (side, teamId) => {
+    const normalized = normalizeTeamIdInput(teamId);
+    if (!normalized) return;
+    if (!hasActiveFilters) {
+      setFilteredSeasonPlayers((prev) => ({ ...prev, [side]: { columns: [], rows: [] } }));
+      setFilteredSeasonError((prev) => ({ ...prev, [side]: "" }));
+      return;
+    }
+    setFilteredSeasonLoading((prev) => ({ ...prev, [side]: true }));
+    setFilteredSeasonError((prev) => ({ ...prev, [side]: "" }));
+    try {
+      const params = new URLSearchParams();
+      if (seasonFilterMode !== "all") params.set("filter", seasonFilterMode);
+      if (seasonFilterMode === "vs_selected_opponent" && normalizedOpponentTeamId) {
+        params.set("opponent_team_id", side === "ucsb" ? normalizedOpponentTeamId : UCSB_TEAM_ID);
+      }
+      if (periodScope !== "full") params.set("period_scope", periodScope);
+      const url = `${API_BASE}/api/espn/season/${normalized}/player${params.toString() ? `?${params.toString()}` : ""}`;
+      const payload = await fetchJson(url, {}, 1);
+      const safeCols = (payload.columns || []).filter((c) => !HIDDEN_COLUMNS.has(c));
+      setFilteredSeasonPlayers((prev) => ({ ...prev, [side]: { columns: safeCols, rows: payload.rows || [] } }));
+    } catch (error) {
+      setFilteredSeasonPlayers((prev) => ({ ...prev, [side]: { columns: [], rows: [] } }));
+      setFilteredSeasonError((prev) => ({ ...prev, [side]: error.message }));
+    } finally {
+      setFilteredSeasonLoading((prev) => ({ ...prev, [side]: false }));
+    }
+  }, [hasActiveFilters, seasonFilterMode, normalizedOpponentTeamId, periodScope]);
+
+  useEffect(() => {
+    if (seasonFilterMode === "vs_selected_opponent" && !normalizedOpponentTeamId) {
+      setSeasonFilterMode("all");
+    }
+  }, [seasonFilterMode, normalizedOpponentTeamId]);
+
+  useEffect(() => {
+    loadFilteredSeasonPlayers("ucsb", UCSB_TEAM_ID);
+  }, [loadFilteredSeasonPlayers]);
+
+  useEffect(() => {
+    if (normalizedOpponentTeamId) {
+      loadFilteredSeasonPlayers("opponent", normalizedOpponentTeamId);
+    } else {
+      setFilteredSeasonPlayers((prev) => ({ ...prev, opponent: { columns: [], rows: [] } }));
+      setFilteredSeasonError((prev) => ({ ...prev, opponent: "" }));
+    }
+  }, [loadFilteredSeasonPlayers, normalizedOpponentTeamId]);
+
   const loadPbp = useCallback(async (gameId) => {
     const gid = gameId ?? pbpGameId;
     const clientValidationError = validatePbpAdvancedFilters(pbpAppliedFilters);
@@ -654,7 +712,8 @@ export default function App() {
     const ucsb = encodeURIComponent(UCSB_TEAM_ID);
     const opponent = normalizedOpponentTeamId ? encodeURIComponent(normalizedOpponentTeamId) : "";
     const gameId = encodeURIComponent(pbpGameId);
-    const url = `${API_BASE}/api/pbp/live-stats?ucsb=${ucsb}${opponent ? `&opponent=${opponent}` : ""}&game_id=${gameId}`;
+    const scopeParam = periodScope !== "full" ? `&period_scope=${encodeURIComponent(periodScope)}` : "";
+    const url = `${API_BASE}/api/pbp/live-stats?ucsb=${ucsb}${opponent ? `&opponent=${opponent}` : ""}&game_id=${gameId}${scopeParam}`;
     try {
       const payload = await fetchJson(url, {}, 1);
       setLiveStats({
@@ -674,7 +733,7 @@ export default function App() {
     } finally {
       setLiveStatsLoading(false);
     }
-  }, [normalizedOpponentTeamId, pbpGameId]);
+  }, [normalizedOpponentTeamId, pbpGameId, periodScope]);
 
   useEffect(() => {
     if (!pbpLoading && !pbpError) {
@@ -859,21 +918,25 @@ export default function App() {
   const activeSeasonName = activeSeasonSide === "ucsb" ? ucsbDisplayName : opponentDisplayName;
   const activeLivePrefix = activeLiveSide === "ucsb" ? "ucsb" : "opponent";
   const seasonDataByTeamId = useMemo(() => {
+    const source = hasActiveFilters ? filteredSeasonPlayers : seasonPlayers;
     const map = {};
-    if (seasonPlayers.ucsb.rows.length) {
-      map[UCSB_TEAM_ID] = seasonPlayers.ucsb;
+    if (source.ucsb.rows.length) {
+      map[UCSB_TEAM_ID] = source.ucsb;
     }
-    if (normalizedOpponentTeamId && seasonPlayers.opponent.rows.length) {
-      map[normalizedOpponentTeamId] = seasonPlayers.opponent;
+    if (normalizedOpponentTeamId && source.opponent.rows.length) {
+      map[normalizedOpponentTeamId] = source.opponent;
     }
     return map;
-  }, [seasonPlayers, normalizedOpponentTeamId]);
+  }, [hasActiveFilters, filteredSeasonPlayers, seasonPlayers, normalizedOpponentTeamId]);
 
-  const activeSeasonPlayers = seasonPlayers[activeSeasonSide];
+  const activeSeasonSource = hasActiveFilters ? filteredSeasonPlayers : seasonPlayers;
+  const activeSeasonPlayers = activeSeasonSource[activeSeasonSide];
   const activeSeasonDisplayRows = useMemo(
     () => convertSeasonRows(activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode),
     [activeSeasonPlayers.rows, activeSeasonPlayers.columns, seasonStatMode]
   );
+  const activeFilteredLoading = filteredSeasonLoading[activeSeasonSide];
+  const activeFilteredError = filteredSeasonError[activeSeasonSide];
   const activeSeasonPlayersLoading = seasonPlayersLoading[activeSeasonSide];
   const activeSeasonPlayersError = seasonPlayersError[activeSeasonSide];
   const activeSeasonPlayersTableState = seasonPlayersTableState[activeSeasonSide];
@@ -1214,6 +1277,7 @@ export default function App() {
               <>
             <div className="section-header">
               <h2>Season Data</h2>
+              <InfoTooltipButton text="Season: 2025-2026 Regular Season only. Scope: UCSB plus opponents on UCSB's schedule only." label="(i)" />
               <span>Viewing: {activeSeasonName}</span>
               <CollapseButton
                 panelRef={seasonDataPanelRef}
@@ -1260,6 +1324,9 @@ export default function App() {
                           </optgroup>
                         ))}
                       </select>
+                      <button type="button" onClick={startBuild} disabled={Boolean(buildJob && buildJob.status === "running")}>
+                        Build Season Data
+                      </button>
                     </>
                   ) : (
                     <span>Opponent list unavailable until supported teams load.</span>
@@ -1269,8 +1336,9 @@ export default function App() {
             </div>
 
             <div className="table-status">
-              <InfoTooltipButton text="Season: 2025-2026 Regular Season only. Scope: UCSB plus opponents on UCSB's schedule only." />
               {activeSeasonPlayersLoading ? <span> Loading season players...</span> : null}
+              {activeFilteredLoading ? <span> Loading filtered data...</span> : null}
+              {activeFilteredError ? <span className="error"> {activeFilteredError}</span> : null}
               {activeSeasonPlayersError ? <span className="error"> {activeSeasonPlayersError}</span> : null}
               {teamsLoading ? <span> Loading ESPN teams...</span> : null}
               {teamsError ? <span className="error"> {teamsError}</span> : null}
@@ -1281,15 +1349,27 @@ export default function App() {
                   Build: {buildJob.stage} {buildJob.current_game_index || 0}/{buildJob.total_games || 0} ({buildJob.status})
                 </span>
               ) : null}
+              {buildJob?.message ? <span> {buildJob.message}</span> : null}
+              {buildJob?.error_message ? <span className="error"> {buildJob.error_message}</span> : null}
               {activeSeasonSide === "opponent" && !normalizedOpponentTeamId ? <span> Select an opponent team to view opponent data.</span> : null}
             </div>
-            <div className="table-status">
-              <button type="button" onClick={startBuild} disabled={Boolean(buildJob && buildJob.status === "running")}>
-                Build Season Data
-              </button>
-              {buildJob?.message ? <span>{buildJob.message}</span> : null}
-              {buildJob?.error_message ? <span className="error">{buildJob.error_message}</span> : null}
+            <div className="season-filter-row">
+              <label className="season-filter-select">
+                <span>Filter</span>
+                <select value={seasonFilterMode} onChange={(event) => setSeasonFilterMode(event.target.value)}>
+                  <option value="all">All</option>
+                  <option value="home">Home</option>
+                  <option value="away">Away</option>
+                  <option value="conference">Conference</option>
+                  <option value="vs_selected_opponent" disabled={!normalizedOpponentTeamId}>
+                    Vs Selected Opponent
+                  </option>
+                </select>
+              </label>
             </div>
+            {hasActiveFilters && !activeFilteredError && activeSeasonDisplayRows.length === 0 && !activeFilteredLoading ? (
+              <div className="table-status"><span>No matching games for the selected filters.</span></div>
+            ) : null}
             <DataTable
               columns={activeSeasonPlayers.columns}
               rows={activeSeasonDisplayRows}
@@ -1304,22 +1384,29 @@ export default function App() {
                 }))
               }
               extraControls={
-                <div className="stat-mode-toggle">
-                  <button
-                    type="button"
-                    className={seasonStatMode === "totals" ? "active" : ""}
-                    onClick={() => setSeasonStatMode("totals")}
-                  >
-                    Totals
-                  </button>
-                  <button
-                    type="button"
-                    className={seasonStatMode === "pergame" ? "active" : ""}
-                    onClick={() => setSeasonStatMode("pergame")}
-                  >
-                    Per Game
-                  </button>
-                </div>
+                <>
+                  <div className="stat-mode-toggle">
+                    <button
+                      type="button"
+                      className={seasonStatMode === "totals" ? "active" : ""}
+                      onClick={() => setSeasonStatMode("totals")}
+                    >
+                      Totals
+                    </button>
+                    <button
+                      type="button"
+                      className={seasonStatMode === "pergame" ? "active" : ""}
+                      onClick={() => setSeasonStatMode("pergame")}
+                    >
+                      Per Game
+                    </button>
+                  </div>
+                  <div className="stat-mode-toggle">
+                    <button type="button" className={periodScope === "full" ? "active" : ""} onClick={() => setPeriodScope("full")}>Full Game</button>
+                    <button type="button" className={periodScope === "1st" ? "active" : ""} onClick={() => setPeriodScope("1st")}>1st Half</button>
+                    <button type="button" className={periodScope === "2nd" ? "active" : ""} onClick={() => setPeriodScope("2nd")}>2nd Half</button>
+                  </div>
+                </>
               }
             />
               </>
@@ -1438,44 +1525,51 @@ export default function App() {
                   cellColorFn={liveCellColorFn}
                   rowStyleFn={liveRowStyleFn}
                   extraControls={
-                    <div className="live-color-controls">
-                      <label>
-                        <span className="control-label">
-                          Color start (pct dev) <strong className="control-value">{liveColorStartPctDeviation.toFixed(2)}</strong>
-                        </span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.05"
-                          value={liveColorStartPctDeviation}
-                          onChange={handleLiveColorStartChange}
-                        />
-                      </label>
-                      <label>
-                        <span className="control-label">
-                          Color cap (pct dev) <strong className="control-value">{liveColorCapPctDeviation.toFixed(2)}</strong>
-                        </span>
-                        <input
-                          type="range"
-                          min={liveColorCapMin}
-                          max="2"
-                          step="0.05"
-                          value={liveColorCapPctDeviation}
-                          onChange={handleLiveColorCapChange}
-                        />
-                      </label>
-                      <label>
-                        <span className="control-label">Min attempts for % color</span>
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          value={minPctColorAttempts}
-                          onChange={handleMinPctColorAttemptsChange}
-                        />
-                      </label>
-                    </div>
+                    <>
+                      <div className="stat-mode-toggle">
+                        <button type="button" className={periodScope === "full" ? "active" : ""} onClick={() => setPeriodScope("full")}>Full Game</button>
+                        <button type="button" className={periodScope === "1st" ? "active" : ""} onClick={() => setPeriodScope("1st")}>1st Half</button>
+                        <button type="button" className={periodScope === "2nd" ? "active" : ""} onClick={() => setPeriodScope("2nd")}>2nd Half</button>
+                      </div>
+                      <div className="live-color-controls">
+                        <label>
+                          <span className="control-label">
+                            Color start (pct dev) <strong className="control-value">{liveColorStartPctDeviation.toFixed(2)}</strong>
+                          </span>
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={liveColorStartPctDeviation}
+                            onChange={handleLiveColorStartChange}
+                          />
+                        </label>
+                        <label>
+                          <span className="control-label">
+                            Color cap (pct dev) <strong className="control-value">{liveColorCapPctDeviation.toFixed(2)}</strong>
+                          </span>
+                          <input
+                            type="range"
+                            min={liveColorCapMin}
+                            max="2"
+                            step="0.05"
+                            value={liveColorCapPctDeviation}
+                            onChange={handleLiveColorCapChange}
+                          />
+                        </label>
+                        <label>
+                          <span className="control-label">Min attempts for % color</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={minPctColorAttempts}
+                            onChange={handleMinPctColorAttemptsChange}
+                          />
+                        </label>
+                      </div>
+                    </>
                   }
                 />
               </>

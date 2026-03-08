@@ -1,0 +1,35 @@
+CREATE TABLE IF NOT EXISTS game_player_scope_stats (
+    game_id TEXT NOT NULL,
+    team_id TEXT NOT NULL,
+    period_scope TEXT NOT NULL,
+    player_key TEXT NOT NULL,
+    athlete_id TEXT NOT NULL,
+    player_name TEXT NOT NULL,
+    games_played INTEGER NOT NULL DEFAULT 1,
+    points INTEGER NOT NULL DEFAULT 0,
+    rebounds INTEGER NOT NULL DEFAULT 0,
+    assists INTEGER NOT NULL DEFAULT 0,
+    turnovers INTEGER NOT NULL DEFAULT 0,
+    steals INTEGER NOT NULL DEFAULT 0,
+    blocks INTEGER NOT NULL DEFAULT 0,
+    personal_fouls INTEGER NOT NULL DEFAULT 0,
+    fgm INTEGER NOT NULL DEFAULT 0,
+    fga INTEGER NOT NULL DEFAULT 0,
+    fg3m INTEGER NOT NULL DEFAULT 0,
+    fg3a INTEGER NOT NULL DEFAULT 0,
+    ftm INTEGER NOT NULL DEFAULT 0,
+    fta INTEGER NOT NULL DEFAULT 0,
+    layup_m INTEGER NOT NULL DEFAULT 0,
+    layup_a INTEGER NOT NULL DEFAULT 0,
+    dunk_m INTEGER NOT NULL DEFAULT 0,
+    dunk_a INTEGER NOT NULL DEFAULT 0,
+    mid_m INTEGER NOT NULL DEFAULT 0,
+    mid_a INTEGER NOT NULL DEFAULT 0,
+    dunks INTEGER NOT NULL DEFAULT 0,
+    tips INTEGER NOT NULL DEFAULT 0,
+    seconds_played INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (game_id, team_id, period_scope, player_key)
+);
+
+CREATE INDEX IF NOT EXISTS game_player_scope_stats_scope_idx
+    ON game_player_scope_stats (team_id, period_scope, game_id);

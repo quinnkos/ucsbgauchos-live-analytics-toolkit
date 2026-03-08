@@ -647,6 +647,26 @@ tbody tr.highlighted > td {
   border-left: 1px solid var(--line);
 }
 
+.season-filter-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.season-filter-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.season-filter-select select {
+  min-width: 210px;
+}
+
 .table-empty {
   padding: 18px;
   color: var(--muted);

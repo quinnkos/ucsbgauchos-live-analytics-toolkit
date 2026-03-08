@@ -68,6 +68,8 @@ PLAYER_APPEND_COLUMNS = [
     "FT%",
 ]
 PLAYER_TABLE_COLUMNS = ["row_key", *PLAYER_BASE_COLUMNS, *PLAYER_APPEND_COLUMNS]
+VALID_PERIOD_SCOPES = {"full", "1st", "2nd"}
+VALID_SEASON_FILTER_MODES = {"all", "home", "away", "conference", "vs_selected_opponent"}
 LIVE_TEAM_COLUMNS = [
     "row_key",
     "team_id",
@@ -179,6 +181,29 @@ def normalize_team_id(value: str) -> str:
     if not cleaned:
         raise ValueError("team_id must contain letters/numbers/hyphens")
     return cleaned
+
+
+def normalize_period_scope(value: str) -> str:
+    normalized = str(value or "full").strip().lower()
+    if normalized not in VALID_PERIOD_SCOPES:
+        raise ValueError("period_scope must be one of: full, 1st, 2nd")
+    return normalized
+
+
+def normalize_season_filter_mode(value: str) -> str:
+    normalized = str(value or "all").strip().lower()
+    if normalized not in VALID_SEASON_FILTER_MODES:
+        raise ValueError("filter must be one of: all, home, away, conference, vs_selected_opponent")
+    return normalized
+
+
+def period_numbers_for_scope(period_scope: str) -> Optional[Tuple[int, ...]]:
+    normalized = normalize_period_scope(period_scope)
+    if normalized == "full":
+        return None
+    if normalized == "1st":
+        return (1,)
+    return (2,)
 
 
 def team_id_matches(left: str, right: str) -> bool:
@@ -1344,6 +1369,206 @@ class BuildService:
             return {}
         return compute_seconds_played_from_pbp(rows, self.starting_lineups_for_game(game_id, rows))
 
+    def _plays_for_period_scope(
+        self,
+        plays: Sequence[Dict[str, Any]],
+        period_scope: str,
+    ) -> List[Dict[str, Any]]:
+        target_periods = period_numbers_for_scope(period_scope)
+        if target_periods is None:
+            return list(plays)
+        return [
+            play
+            for play in plays
+            if int(play.get("period_number") or 0) in target_periods
+        ]
+
+    def _lineups_at_period_start(
+        self,
+        game_id: str,
+        start_period: int,
+        plays: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Set[str]]:
+        if start_period <= 1:
+            return self.starting_lineups_for_game(game_id, plays)
+
+        on_court = {
+            team_id: set(lineup)
+            for team_id, lineup in self.starting_lineups_for_game(game_id, plays).items()
+        }
+        ordered_plays = sorted(
+            plays,
+            key=lambda play: (
+                int(play.get("sequence_number") or play.get("sequence") or 0),
+                str(play.get("play_key") or ""),
+            ),
+        )
+        for play in ordered_plays:
+            period_number = int(play.get("period_number") or 0)
+            if period_number <= 0:
+                continue
+            if period_number >= start_period:
+                break
+            team_id = str(play.get("team_id") or "").strip()
+            athlete_id = str(play.get("athlete_id") or "").strip()
+            text_lower = str(play.get("text") or "").lower()
+            play_type = normalize_play_type(str(play.get("play_type") or play.get("type") or ""))
+            is_substitution = play_type == "substitution" or "subbing in" in text_lower or "subbing out" in text_lower
+            if not is_substitution or not team_id or not athlete_id:
+                continue
+            lineup = on_court.setdefault(team_id, set())
+            if "subbing out" in text_lower:
+                lineup.discard(athlete_id)
+            if "subbing in" in text_lower:
+                lineup.add(athlete_id)
+        return {
+            team_id: set(lineup)
+            for team_id, lineup in on_court.items()
+        }
+
+    def _stored_athlete_names_for_game(self, game_id: str) -> Dict[str, Dict[str, str]]:
+        rows = self.db.fetch_all(
+            """
+            SELECT DISTINCT team_id, athlete_id, player_name
+            FROM game_player_stats
+            WHERE game_id = ?
+            """,
+            (game_id,),
+        )
+        athlete_names: Dict[str, Dict[str, str]] = {}
+        for row in rows:
+            team_id = str(row.get("team_id") or "").strip()
+            athlete_id = str(row.get("athlete_id") or "").strip()
+            if not team_id or not athlete_id:
+                continue
+            athlete_names.setdefault(team_id, {})
+            athlete_names[team_id][athlete_id] = str(row.get("player_name") or athlete_id)
+        return athlete_names
+
+    def _replace_player_scope_stats(
+        self,
+        game_id: str,
+        plays: Sequence[Dict[str, Any]],
+        athlete_names_by_team: Dict[str, Dict[str, str]],
+    ) -> None:
+        full_plays = list(plays)
+        scoped_rows: List[Sequence[Any]] = []
+        scoped_lineups = {
+            "full": self.starting_lineups_for_game(game_id, full_plays),
+            "1st": self.starting_lineups_for_game(game_id, full_plays),
+            "2nd": self._lineups_at_period_start(game_id, 2, full_plays),
+        }
+
+        for period_scope in ("full", "1st", "2nd"):
+            scope_plays = self._plays_for_period_scope(full_plays, period_scope)
+            if not scope_plays:
+                continue
+            _, player_rows = derive_game_stats(scope_plays, athlete_names_by_team)
+            seconds_by_team = compute_seconds_played_from_pbp(scope_plays, scoped_lineups[period_scope])
+            for row in player_rows:
+                scoped_rows.append(
+                    (
+                        game_id,
+                        row["team_id"],
+                        period_scope,
+                        row["player_key"],
+                        row["athlete_id"],
+                        row["player_name"],
+                        1,
+                        row["points"],
+                        row["rebounds"],
+                        row["assists"],
+                        row["turnovers"],
+                        row["steals"],
+                        row["blocks"],
+                        row["personal_fouls"],
+                        row["fgm"],
+                        row["fga"],
+                        row["fg3m"],
+                        row["fg3a"],
+                        row["ftm"],
+                        row["fta"],
+                        row["layup_m"],
+                        row["layup_a"],
+                        row["dunk_m"],
+                        row["dunk_a"],
+                        row["mid_m"],
+                        row["mid_a"],
+                        row["dunks"],
+                        row["tips"],
+                        int(seconds_by_team.get(row["team_id"], {}).get(row["athlete_id"], 0)),
+                    )
+                )
+
+        self.db.execute("DELETE FROM game_player_scope_stats WHERE game_id = ?", (game_id,))
+        if not scoped_rows:
+            return
+        self.db.executemany(
+            """
+            INSERT INTO game_player_scope_stats (
+                game_id, team_id, period_scope, player_key, athlete_id, player_name, games_played, points,
+                rebounds, assists, turnovers, steals, blocks, personal_fouls, fgm, fga, fg3m, fg3a,
+                ftm, fta, layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips, seconds_played
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            scoped_rows,
+        )
+
+    def _ensure_player_scope_stats(self, game_ids: Sequence[str], period_scope: str) -> None:
+        normalized_scope = normalize_period_scope(period_scope)
+        unique_ids = [str(game_id).strip() for game_id in game_ids if str(game_id).strip()]
+        if not unique_ids:
+            return
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self.db.fetch_all(
+            f"""
+            SELECT DISTINCT game_id
+            FROM game_player_scope_stats
+            WHERE period_scope = ? AND game_id IN ({placeholders})
+            """,
+            (normalized_scope, *unique_ids),
+        )
+        existing = {str(row["game_id"]) for row in rows}
+        missing = [game_id for game_id in unique_ids if game_id not in existing]
+        for game_id in missing:
+            plays = self._stats_pbp_rows(game_id)
+            if not plays:
+                continue
+            athlete_names_by_team = self._stored_athlete_names_for_game(game_id)
+            if not athlete_names_by_team:
+                athlete_names_by_team = {}
+                for play in plays:
+                    team_id = str(play.get("team_id") or "").strip()
+                    athlete_id = str(play.get("athlete_id") or "").strip()
+                    if not team_id or not athlete_id:
+                        continue
+                    athlete_names_by_team.setdefault(team_id, {})
+                    athlete_names_by_team[team_id].setdefault(athlete_id, athlete_id)
+            self._replace_player_scope_stats(game_id, plays, athlete_names_by_team)
+
+    def player_seconds_for_game_scope(self, game_id: str, period_scope: str = "full") -> Dict[str, Dict[str, int]]:
+        normalized_scope = normalize_period_scope(period_scope)
+        if normalized_scope == "full":
+            return self.player_seconds_for_game(game_id)
+        self._ensure_player_scope_stats([game_id], normalized_scope)
+        rows = self.db.fetch_all(
+            """
+            SELECT team_id, athlete_id, seconds_played
+            FROM game_player_scope_stats
+            WHERE game_id = ? AND period_scope = ?
+            """,
+            (game_id, normalized_scope),
+        )
+        seconds_by_team: Dict[str, Dict[str, int]] = {}
+        for row in rows:
+            team_id = str(row.get("team_id") or "").strip()
+            athlete_id = str(row.get("athlete_id") or "").strip()
+            if not team_id or not athlete_id:
+                continue
+            seconds_by_team.setdefault(team_id, {})
+            seconds_by_team[team_id][athlete_id] = int(row.get("seconds_played") or 0)
+        return seconds_by_team
+
     def raw_pbp_rows(self, game_id: Optional[str] = None) -> List[Dict[str, Any]]:
         target = game_id or self.default_game_id()
         rows = self.db.fetch_all(
@@ -1364,6 +1589,7 @@ class BuildService:
         if not rows:
             self.db.execute("DELETE FROM game_team_stats WHERE game_id = ?", (game_id,))
             self.db.execute("DELETE FROM game_player_stats WHERE game_id = ?", (game_id,))
+            self.db.execute("DELETE FROM game_player_scope_stats WHERE game_id = ?", (game_id,))
             return False
         team_ids = sorted({str(row["team_id"]) for row in rows if row.get("team_id")})
         athlete_names = {team_id: fetch_team_roster(team_id) for team_id in team_ids}
@@ -1372,9 +1598,11 @@ class BuildService:
         if force:
             self.db.execute("DELETE FROM game_team_stats WHERE game_id = ?", (game_id,))
             self.db.execute("DELETE FROM game_player_stats WHERE game_id = ?", (game_id,))
+            self.db.execute("DELETE FROM game_player_scope_stats WHERE game_id = ?", (game_id,))
         else:
             self.db.execute("DELETE FROM game_team_stats WHERE game_id = ?", (game_id,))
             self.db.execute("DELETE FROM game_player_stats WHERE game_id = ?", (game_id,))
+            self.db.execute("DELETE FROM game_player_scope_stats WHERE game_id = ?", (game_id,))
         self.db.executemany(
             """
             INSERT INTO game_team_stats (
@@ -1454,6 +1682,15 @@ class BuildService:
                 for row in player_rows
             ],
         )
+        athlete_names_by_team: Dict[str, Dict[str, str]] = {}
+        for row in player_rows:
+            team_id = str(row.get("team_id") or "").strip()
+            athlete_id = str(row.get("athlete_id") or "").strip()
+            if not team_id or not athlete_id:
+                continue
+            athlete_names_by_team.setdefault(team_id, {})
+            athlete_names_by_team[team_id][athlete_id] = str(row.get("player_name") or athlete_id)
+        self._replace_player_scope_stats(game_id, rows, athlete_names_by_team)
         return True
 
     def aggregate_season_stats(self, force: bool = False) -> None:
@@ -1699,6 +1936,154 @@ class BuildService:
         )
         return display_rows
 
+    def _filtered_game_ids(
+        self,
+        team_id: str,
+        *,
+        filter_mode: str = "all",
+        opponent_team_id: str = "",
+    ) -> List[str]:
+        normalized_team_id = normalize_team_id(team_id)
+        normalized_filter = normalize_season_filter_mode(filter_mode)
+        normalized_opponent_id = normalize_team_id(opponent_team_id) if opponent_team_id else ""
+        games = self.db.fetch_all(
+            """
+            SELECT
+                sg.game_id,
+                sg.home_away,
+                sg.opponent_team_id,
+                team.conference_name AS team_conference_name,
+                opponent.conference_name AS opponent_conference_name
+            FROM schedule_games sg
+            LEFT JOIN teams team ON team.team_id = sg.team_id
+            LEFT JOIN teams opponent ON opponent.team_id = sg.opponent_team_id
+            WHERE sg.season_id = ? AND sg.season_type = ? AND sg.team_id = ?
+            ORDER BY sg.game_date, sg.game_id
+            """,
+            (SEASON_ID, SEASON_TYPE, normalized_team_id),
+        )
+        if normalized_filter == "home":
+            games = [game for game in games if str(game.get("home_away") or "") == "home"]
+        elif normalized_filter == "away":
+            games = [game for game in games if str(game.get("home_away") or "") == "away"]
+        elif normalized_filter == "conference":
+            games = [
+                game
+                for game in games
+                if str(game.get("team_conference_name") or "").strip()
+                and str(game.get("team_conference_name") or "").strip()
+                == str(game.get("opponent_conference_name") or "").strip()
+            ]
+        elif normalized_filter == "vs_selected_opponent":
+            if not normalized_opponent_id:
+                return []
+            games = [
+                game
+                for game in games
+                if normalize_team_id(str(game.get("opponent_team_id") or "")) == normalized_opponent_id
+            ]
+        return [str(game["game_id"]) for game in games]
+
+    def filtered_season_player_rows(
+        self,
+        team_id: str,
+        *,
+        filter_mode: str = "all",
+        opponent_team_id: str = "",
+        period_scope: str = "full",
+    ) -> List[Dict[str, str]]:
+        normalized = normalize_team_id(team_id)
+        normalized_scope = normalize_period_scope(period_scope)
+        game_ids = self._filtered_game_ids(
+            normalized,
+            filter_mode=filter_mode,
+            opponent_team_id=opponent_team_id,
+        )
+        if not game_ids:
+            return []
+        self._ensure_player_scope_stats(game_ids, normalized_scope)
+        placeholders = ",".join("?" for _ in game_ids)
+        rows = self.db.fetch_all(
+            f"""
+            SELECT *
+            FROM game_player_scope_stats
+            WHERE team_id = ? AND period_scope = ? AND game_id IN ({placeholders})
+            """,
+            (normalized, normalized_scope, *game_ids),
+        )
+        aggregated = aggregate_rows(rows, ("team_id", "player_key"))
+
+        if not aggregated:
+            return []
+
+        display_rows: List[Dict[str, str]] = []
+        totals = stat_line()
+        max_gp = 0
+        total_seconds_played = 0
+        for row in sorted(aggregated, key=lambda r: -int(r.get("points", 0))):
+            gp = int(row.get("games_played") or 0)
+            max_gp = max(max_gp, gp)
+            total_seconds_played += int(row.get("seconds_played") or 0)
+            for key in totals:
+                totals[key] += int(row.get(key) or 0)
+            display_rows.append(
+                player_display_row(
+                    row_key=f"{normalized}_{row.get('player_key', '')}",
+                    player_name=str(row.get("player_name") or row.get("player_key", "")),
+                    games_played=gp,
+                    games_started=0,
+                    seconds_played=int(row.get("seconds_played") or 0),
+                    points=int(row.get("points") or 0),
+                    rebounds=int(row.get("rebounds") or 0),
+                    assists=int(row.get("assists") or 0),
+                    turnovers=int(row.get("turnovers") or 0),
+                    steals=int(row.get("steals") or 0),
+                    blocks=int(row.get("blocks") or 0),
+                    personal_fouls=int(row.get("personal_fouls") or 0),
+                    ftm=int(row.get("ftm") or 0),
+                    fta=int(row.get("fta") or 0),
+                    fgm=int(row.get("fgm") or 0),
+                    fga=int(row.get("fga") or 0),
+                    fg3m=int(row.get("fg3m") or 0),
+                    fg3a=int(row.get("fg3a") or 0),
+                    mid_m=int(row.get("mid_m") or 0),
+                    mid_a=int(row.get("mid_a") or 0),
+                    layup_m=int(row.get("layup_m") or 0),
+                    layup_a=int(row.get("layup_a") or 0),
+                    dunks=int(row.get("dunks") or 0),
+                    tips=int(row.get("tips") or 0),
+                )
+            )
+        display_rows.append(
+            player_display_row(
+                row_key=f"{normalized}_team",
+                player_name="Team",
+                games_played=max_gp,
+                games_started=max_gp,
+                seconds_played=total_seconds_played,
+                points=totals["points"],
+                rebounds=totals["rebounds"],
+                assists=totals["assists"],
+                turnovers=totals["turnovers"],
+                steals=totals["steals"],
+                blocks=totals["blocks"],
+                personal_fouls=totals["personal_fouls"],
+                ftm=totals["ftm"],
+                fta=totals["fta"],
+                fgm=totals["fgm"],
+                fga=totals["fga"],
+                fg3m=totals["fg3m"],
+                fg3a=totals["fg3a"],
+                mid_m=totals["mid_m"],
+                mid_a=totals["mid_a"],
+                layup_m=totals["layup_m"],
+                layup_a=totals["layup_a"],
+                dunks=totals["dunks"],
+                tips=totals["tips"],
+            )
+        )
+        return display_rows
+
     def latest_pbp_metadata(self, game_id: str) -> Dict[str, Any]:
         row = self.db.fetch_one(
             "SELECT * FROM pbp_ingests WHERE game_id = ? ORDER BY fetched_at DESC LIMIT 1",
@@ -1762,11 +2147,28 @@ class LocalFirstService:
             raise ValueError("team_id must be UCSB or a UCSB regular-season opponent")
         return self.build_service.schedule_for_team(normalized_team_id)
 
-    def player_dataset(self, team_id: str) -> Dict[str, Any]:
+    def player_dataset(
+        self,
+        team_id: str,
+        *,
+        filter_mode: str = "all",
+        opponent_team_id: str = "",
+        period_scope: str = "full",
+    ) -> Dict[str, Any]:
         normalized_team_id = normalize_team_id(team_id)
         if normalized_team_id not in self._allowed_team_ids():
             raise ValueError("team_id must be UCSB or a UCSB regular-season opponent")
-        rows = self.build_service.season_player_rows(normalized_team_id)
+        normalized_filter = normalize_season_filter_mode(filter_mode)
+        normalized_scope = normalize_period_scope(period_scope)
+        if normalized_filter == "all" and normalized_scope == "full":
+            rows = self.build_service.season_player_rows(normalized_team_id)
+        else:
+            rows = self.build_service.filtered_season_player_rows(
+                normalized_team_id,
+                filter_mode=normalized_filter,
+                opponent_team_id=opponent_team_id,
+                period_scope=normalized_scope,
+            )
         return {
             "team_id": normalized_team_id,
             "columns": PLAYER_TABLE_COLUMNS,
@@ -1787,8 +2189,8 @@ class LocalFirstService:
     def load_pbp_rows(self, game_id: str) -> List[Dict[str, Any]]:
         return self.build_service.raw_pbp_rows(game_id)
 
-    def player_seconds_for_game(self, game_id: str) -> Dict[str, Dict[str, int]]:
-        return self.build_service.player_seconds_for_game(game_id)
+    def player_seconds_for_game(self, game_id: str, period_scope: str = "full") -> Dict[str, Dict[str, int]]:
+        return self.build_service.player_seconds_for_game_scope(game_id, period_scope=period_scope)
 
     def pbp_summary(self, game_id: str) -> Dict[str, Any]:
         latest = self.build_service.latest_pbp_metadata(game_id)

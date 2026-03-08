@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from apps.api.local_first import (
+    BuildService,
     LocalFirstService,
     classify_shot_zone,
     compute_seconds_played_from_pbp,
@@ -653,6 +654,200 @@ class ScopeGuardTests(unittest.TestCase):
                 service.player_dataset("999999")
             with self.assertRaises(ValueError):
                 service.team_dataset("999999")
+
+
+def _setup_filtered_service(tmpdir: str):
+    """Create a service with two games and PBP data for filtered aggregation tests."""
+    root = Path(tmpdir)
+    service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
+    with service.connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO teams (team_id, school_name, abbreviation, display_name, conference_name, conference_abbreviation)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("2540", "UC Santa Barbara", "UCSB", "UC Santa Barbara Gauchos", "Big West", "BW"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO teams (team_id, school_name, abbreviation, display_name, conference_name, conference_abbreviation)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("27", "UC Riverside", "UCR", "UC Riverside Highlanders", "Big West", "BW"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO teams (team_id, school_name, abbreviation, display_name, conference_name, conference_abbreviation)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("999", "Non-Conf Team", "NCT", "Non-Conf Team", "Mountain West", "MW"),
+        )
+        conn.execute(
+            "INSERT INTO schedule_games (season_id, season_type, team_id, game_id, game_date, opponent_team_id, opponent_name, home_away, schedule_source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("2025-2026", "regular", "2540", "game-home-conf", "2026-01-10", "27", "UC Riverside", "home", "test"),
+        )
+        conn.execute(
+            "INSERT INTO schedule_games (season_id, season_type, team_id, game_id, game_date, opponent_team_id, opponent_name, home_away, schedule_source)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("2025-2026", "regular", "2540", "game-away-nonconf", "2026-01-15", "999", "Non-Conf Team", "away", "test"),
+        )
+        conn.execute(
+            """INSERT INTO game_player_stats (
+                game_id, team_id, player_key, athlete_id, player_name, games_played,
+                points, rebounds, assists, turnovers, steals, blocks, personal_fouls,
+                fgm, fga, fg3m, fg3a, ftm, fta, layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips, seconds_played
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("game-home-conf", "2540", "1", "1", "Guard One", 1, 20, 5, 3, 2, 1, 0, 2, 8, 15, 2, 5, 2, 3, 3, 5, 0, 0, 3, 5, 0, 0, 1200),
+        )
+        conn.execute(
+            """INSERT INTO game_player_stats (
+                game_id, team_id, player_key, athlete_id, player_name, games_played,
+                points, rebounds, assists, turnovers, steals, blocks, personal_fouls,
+                fgm, fga, fg3m, fg3a, ftm, fta, layup_m, layup_a, dunk_m, dunk_a, mid_m, mid_a, dunks, tips, seconds_played
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("game-away-nonconf", "2540", "1", "1", "Guard One", 1, 15, 4, 2, 1, 0, 1, 3, 6, 12, 1, 3, 2, 2, 2, 4, 0, 0, 3, 5, 0, 0, 1100),
+        )
+        # PBP plays for period-scope testing
+        for gid, plays in [
+            ("game-home-conf", [
+                ("p1", 1, 1, 1200, "2540", "1", "", "LayUpShot", "made layup", 1, 1, 2, 2),
+                ("p2", 2, 1, 600, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("p3", 3, 1, 500, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("p4", 4, 1, 400, "2540", "1", "", "FreeThrow", "made free throw", 1, 0, 1, 1),
+                ("p5", 5, 1, 300, "2540", "1", "", "JumpShot", "made three", 1, 1, 3, 3),
+                ("p6", 6, 2, 1200, "2540", "1", "", "JumpShot", "made three", 1, 1, 3, 3),
+                ("p7", 7, 2, 900, "2540", "1", "", "LayUpShot", "made layup", 1, 1, 2, 2),
+                ("p8", 8, 2, 700, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("p9", 9, 2, 500, "2540", "1", "", "JumpShot", "made three", 1, 1, 3, 3),
+            ]),
+            ("game-away-nonconf", [
+                ("q1", 1, 1, 1200, "2540", "1", "", "LayUpShot", "made layup", 1, 1, 2, 2),
+                ("q2", 2, 1, 900, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("q3", 3, 1, 700, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("q4", 4, 1, 600, "2540", "1", "", "FreeThrow", "made free throw", 1, 0, 1, 1),
+                ("q5", 5, 2, 1200, "2540", "1", "", "JumpShot", "made three", 1, 1, 3, 3),
+                ("q6", 6, 2, 800, "2540", "1", "", "JumpShot", "made jumper", 1, 1, 2, 2),
+                ("q7", 7, 2, 400, "2540", "1", "", "JumpShot", "made three", 1, 1, 3, 3),
+            ]),
+        ]:
+            conn.executemany(
+                """INSERT INTO pbp_plays (
+                    game_id, play_key, espn_play_id, sequence_number, period_number, period_display,
+                    clock, clock_seconds, team_id, athlete_id, assist_athlete_id, play_type, text,
+                    scoring_play, shooting_play, score_value, points_attempted, home_score, away_score,
+                    wallclock, ingest_id, raw_payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, '', 'test', '{}')""",
+                [
+                    (gid, pk, pk, seq, per, f"{per}{'st' if per==1 else 'nd'} Half", "20:00", cs, tid, aid, aaid, pt, txt, sp, shp, sv, pa)
+                    for pk, seq, per, cs, tid, aid, aaid, pt, txt, sp, shp, sv, pa in plays
+                ],
+            )
+    return service
+
+
+class FilteredSeasonAggregationTests(unittest.TestCase):
+    def test_filter_home_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540", filter_mode="home")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "20")
+
+    def test_filter_away_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540", filter_mode="away")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "15")
+
+    def test_filter_conference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540", filter_mode="conference")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "20")
+
+    def test_filter_vs_opponent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows(
+                "2540", filter_mode="vs_selected_opponent", opponent_team_id="27"
+            )
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "20")
+
+    def test_filter_vs_opponent_no_games(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows(
+                "2540", filter_mode="vs_selected_opponent", opponent_team_id="300"
+            )
+            self.assertEqual(rows, [])
+
+    def test_filter_all_returns_all_games(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "35")
+
+    def test_team_total_row_correct_under_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540", filter_mode="home")
+            team_row = [r for r in rows if r["Player"] == "Team"]
+            self.assertEqual(len(team_row), 1)
+            self.assertEqual(team_row[0]["PTS"], "20")
+
+    def test_player_dataset_uses_same_endpoint_for_filtered_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            payload = service.player_dataset("2540", filter_mode="home", period_scope="full")
+            player_rows = [r for r in payload["rows"] if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            self.assertEqual(player_rows[0]["PTS"], "20")
+
+
+class PeriodScopeTests(unittest.TestCase):
+    def test_period_scope_1st_half(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            with patch.object(service.build_service, "starting_lineups_for_game", return_value={"2540": set()}):
+                rows = service.build_service.filtered_season_player_rows("2540", period_scope="1st")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            total_pts = int(player_rows[0]["PTS"])
+            self.assertGreater(total_pts, 0)
+            self.assertLess(total_pts, 35)
+
+    def test_period_scope_2nd_half(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            with patch.object(service.build_service, "starting_lineups_for_game", return_value={"2540": set()}):
+                rows = service.build_service.filtered_season_player_rows("2540", period_scope="2nd")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(len(player_rows), 1)
+            total_pts = int(player_rows[0]["PTS"])
+            self.assertGreater(total_pts, 0)
+            self.assertLess(total_pts, 35)
+
+    def test_period_scope_full_matches_precomputed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            rows = service.build_service.filtered_season_player_rows("2540", period_scope="full")
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            self.assertEqual(player_rows[0]["PTS"], "35")
+
+    def test_period_scope_combined_with_home_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = _setup_filtered_service(tmpdir)
+            with patch.object(service.build_service, "starting_lineups_for_game", return_value={"2540": set()}):
+                rows = service.build_service.filtered_season_player_rows(
+                    "2540", filter_mode="home", period_scope="1st"
+                )
+            player_rows = [r for r in rows if r["Player"] != "Team"]
+            if player_rows:
+                self.assertLess(int(player_rows[0]["PTS"]), 20)
 
 
 if __name__ == "__main__":
