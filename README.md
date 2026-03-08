@@ -74,7 +74,7 @@ npm run dev:web
 1. Start the app with `npm run dev`
 2. In the existing UI:
    - choose a supported opponent from the conference-grouped dropdown
-   - click `Refresh Schedule` to verify UCSB's locked regular-season schedule in SQLite
+   - click `Refresh Schedule` to fetch UCSB's regular-season schedule from ESPN into SQLite
    - click `Build Season Data` to ingest PBP, archive raw payloads, derive game stats, and aggregate season stats
 3. Use the schedule-based game dropdown in the Game Data panel to inspect PBP and live stats
 

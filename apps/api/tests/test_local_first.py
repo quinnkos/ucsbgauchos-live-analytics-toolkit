@@ -493,17 +493,6 @@ class PercentageFromMakesAttemptsTests(unittest.TestCase):
 
 
 class ScheduleValidationTests(unittest.TestCase):
-    def test_validate_schedule_reference(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
-            reference = service.load_schedule_reference()["games"]
-            service.validate_schedule(reference)
-            with self.assertRaises(RuntimeError):
-                bad = list(reference)
-                bad[0] = {**bad[0], "home_away": "away"}
-                service.validate_schedule(bad)
-
     def test_parse_schedule_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -592,11 +581,19 @@ class ScheduleValidationTests(unittest.TestCase):
             self.assertEqual(len(games), 1)
             self.assertEqual(games[0]["game_id"], "401809115")
 
-    def test_verify_and_persist_schedule_refreshes_stale_root_schedule_cache(self) -> None:
+    def test_verify_and_persist_schedule_force_refreshes_existing_root_schedule_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
-            reference = service.load_schedule_reference()["games"]
+            refreshed_games = [
+                {
+                    "game_id": "401809115",
+                    "date": "2026-02-08",
+                    "opponent_team_id": "300",
+                    "opponent_name": "UC Irvine Anteaters",
+                    "home_away": "home",
+                }
+            ]
             with service.connect() as conn:
                 conn.execute(
                     """
@@ -610,13 +607,13 @@ class ScheduleValidationTests(unittest.TestCase):
 
             with (
                 patch("apps.api.local_first.fetch_schedule_payload", return_value={"events": []}),
-                patch("apps.api.local_first.parse_schedule_payload", return_value=reference),
+                patch("apps.api.local_first.parse_schedule_payload", return_value=refreshed_games),
                 patch.object(service.build_service, "ensure_supported_teams", return_value=[]),
             ):
-                games = service.verify_and_persist_schedule("2540", force=False)
+                games = service.verify_and_persist_schedule("2540", force=True)
 
-            self.assertEqual(len(games), len(reference))
-            self.assertEqual(games[0]["game_id"], reference[0]["game_id"])
+            self.assertEqual(len(games), len(refreshed_games))
+            self.assertEqual(games[0]["game_id"], refreshed_games[0]["game_id"])
             self.assertNotEqual(games[0]["game_id"], "stale-game")
 
 

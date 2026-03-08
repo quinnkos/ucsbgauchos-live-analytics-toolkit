@@ -609,26 +609,6 @@ def parse_schedule_payload(payload: Dict[str, Any], team_id: str) -> List[Dict[s
     return games
 
 
-def validate_schedule(live_games: Sequence[Dict[str, str]]) -> None:
-    reference_games = schedule_config()["games"]
-    live = [(g["game_id"], g["date"], g["opponent_team_id"], g["home_away"]) for g in live_games]
-    ref = [(g["game_id"], g["date"], g["opponent_team_id"], g["home_away"]) for g in reference_games]
-    if live != ref:
-        raise RuntimeError("Live ESPN UCSB schedule does not match config/ucsb_2025_2026_regular_schedule.json")
-
-
-def schedule_signature(games: Sequence[Dict[str, Any]]) -> List[Tuple[str, str, str, str]]:
-    return [
-        (
-            str(game["game_id"]),
-            str(game["date"]),
-            str(game["opponent_team_id"]),
-            str(game["home_away"]),
-        )
-        for game in games
-    ]
-
-
 def fetch_team_detail(team_id: str) -> Dict[str, Any]:
     return request_json(f"{ESPN_SITE_ROOT}/teams/{team_id}")
 
@@ -972,22 +952,9 @@ class BuildService:
             (SEASON_ID, SEASON_TYPE, normalized_team_id),
         )
         should_refresh = force or not row or int(row["count"]) == 0
-        if not should_refresh and team_id_matches(normalized_team_id, ROOT_TEAM_ID):
-            persisted_games = self.db.fetch_all(
-                """
-                SELECT game_id, game_date AS date, opponent_team_id, home_away
-                FROM schedule_games
-                WHERE season_id = ? AND season_type = ? AND team_id = ?
-                ORDER BY game_date, game_id
-                """,
-                (SEASON_ID, SEASON_TYPE, normalized_team_id),
-            )
-            should_refresh = schedule_signature(persisted_games) != schedule_signature(schedule_config()["games"])
         if should_refresh:
             live_payload = fetch_schedule_payload(normalized_team_id)
             live_games = parse_schedule_payload(live_payload, normalized_team_id)
-            if team_id_matches(normalized_team_id, ROOT_TEAM_ID):
-                validate_schedule(live_games)
             self.db.execute(
                 "INSERT OR REPLACE INTO seasons (season_id, season_type, label, is_locked) VALUES (?, ?, ?, 1)",
                 (SEASON_ID, SEASON_TYPE, "2025-2026 Regular Season"),
@@ -2146,14 +2113,8 @@ class LocalFirstService:
     def connect(self) -> sqlite3.Connection:
         return self.db.connect()
 
-    def load_schedule_reference(self) -> Dict[str, Any]:
-        return schedule_config()
-
     def parse_schedule_payload(self, payload: Dict[str, Any], team_id: str = ROOT_TEAM_ID) -> List[Dict[str, str]]:
         return parse_schedule_payload(payload, team_id)
-
-    def validate_schedule(self, live_games: Sequence[Dict[str, str]]) -> None:
-        validate_schedule(live_games)
 
     def verify_and_persist_schedule(self, team_id: str = ROOT_TEAM_ID, force: bool = False) -> List[Dict[str, Any]]:
         return self.build_service.verify_and_persist_schedule(team_id, force=force)
