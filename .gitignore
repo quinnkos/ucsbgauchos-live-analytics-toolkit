@@ -15,6 +15,7 @@ apps/web/dist/
 
 # Local env
 .env
+apps/web/.env.local
 
 # OS/editor artifacts
 .DS_Store

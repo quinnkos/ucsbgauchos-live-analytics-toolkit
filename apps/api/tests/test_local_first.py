@@ -554,6 +554,71 @@ class ScheduleValidationTests(unittest.TestCase):
             self.assertEqual(games[0]["opponent_team_id"], "30")
             self.assertEqual(games[0]["home_away"], "away")
 
+    def test_parse_schedule_payload_ignores_tournament_competitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
+            payload = {
+                "events": [
+                    {
+                        "id": "401809115",
+                        "date": "2026-02-08T03:00Z",
+                        "competitions": [
+                            {
+                                "type": {"slug": "standard"},
+                                "competitors": [
+                                    {"team": {"id": "2540", "displayName": "UC Santa Barbara Gauchos"}, "homeAway": "home"},
+                                    {"team": {"id": "300", "displayName": "UC Irvine Anteaters"}, "homeAway": "away"},
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "id": "401851392",
+                        "date": "2026-03-12T03:30Z",
+                        "competitions": [
+                            {
+                                "type": {"slug": "tournament"},
+                                "competitors": [
+                                    {"team": {"id": "302", "displayName": "UC Davis Aggies"}, "homeAway": "home"},
+                                    {"team": {"id": "2540", "displayName": "UC Santa Barbara Gauchos"}, "homeAway": "away"},
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            }
+            games = service.parse_schedule_payload(payload, "2540")
+            self.assertEqual(len(games), 1)
+            self.assertEqual(games[0]["game_id"], "401809115")
+
+    def test_verify_and_persist_schedule_refreshes_stale_root_schedule_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            service = LocalFirstService(db_path=root / "state.sqlite3", object_store_root=root / "object_store")
+            reference = service.load_schedule_reference()["games"]
+            with service.connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO schedule_games (
+                        season_id, season_type, team_id, game_id, game_date, opponent_team_id,
+                        opponent_name, home_away, schedule_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("2025-2026", "regular", "2540", "stale-game", "2026-01-01", "9999", "Stale Opponent", "home", "stale_cache"),
+                )
+
+            with (
+                patch("apps.api.local_first.fetch_schedule_payload", return_value={"events": []}),
+                patch("apps.api.local_first.parse_schedule_payload", return_value=reference),
+                patch.object(service.build_service, "ensure_supported_teams", return_value=[]),
+            ):
+                games = service.verify_and_persist_schedule("2540", force=False)
+
+            self.assertEqual(len(games), len(reference))
+            self.assertEqual(games[0]["game_id"], reference[0]["game_id"])
+            self.assertNotEqual(games[0]["game_id"], "stale-game")
+
 
 class BuildJobTransitionTests(unittest.TestCase):
     def test_build_job_transitions_to_success(self) -> None:

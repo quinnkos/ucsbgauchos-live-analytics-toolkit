@@ -573,7 +573,12 @@ def parse_schedule_payload(payload: Dict[str, Any], team_id: str) -> List[Dict[s
         competitions = event.get("competitions") or []
         if not competitions:
             continue
-        competitors = competitions[0].get("competitors") or []
+        competition = competitions[0]
+        competition_type = competition.get("type") or {}
+        competition_slug = str(competition_type.get("slug") or "").strip().lower()
+        if competition_slug == "tournament":
+            continue
+        competitors = competition.get("competitors") or []
         ours = next(
             (
                 item
@@ -610,6 +615,18 @@ def validate_schedule(live_games: Sequence[Dict[str, str]]) -> None:
     ref = [(g["game_id"], g["date"], g["opponent_team_id"], g["home_away"]) for g in reference_games]
     if live != ref:
         raise RuntimeError("Live ESPN UCSB schedule does not match config/ucsb_2025_2026_regular_schedule.json")
+
+
+def schedule_signature(games: Sequence[Dict[str, Any]]) -> List[Tuple[str, str, str, str]]:
+    return [
+        (
+            str(game["game_id"]),
+            str(game["date"]),
+            str(game["opponent_team_id"]),
+            str(game["home_away"]),
+        )
+        for game in games
+    ]
 
 
 def fetch_team_detail(team_id: str) -> Dict[str, Any]:
@@ -954,7 +971,19 @@ class BuildService:
             "SELECT COUNT(*) AS count FROM schedule_games WHERE season_id = ? AND season_type = ? AND team_id = ?",
             (SEASON_ID, SEASON_TYPE, normalized_team_id),
         )
-        if force or not row or int(row["count"]) == 0:
+        should_refresh = force or not row or int(row["count"]) == 0
+        if not should_refresh and team_id_matches(normalized_team_id, ROOT_TEAM_ID):
+            persisted_games = self.db.fetch_all(
+                """
+                SELECT game_id, game_date AS date, opponent_team_id, home_away
+                FROM schedule_games
+                WHERE season_id = ? AND season_type = ? AND team_id = ?
+                ORDER BY game_date, game_id
+                """,
+                (SEASON_ID, SEASON_TYPE, normalized_team_id),
+            )
+            should_refresh = schedule_signature(persisted_games) != schedule_signature(schedule_config()["games"])
+        if should_refresh:
             live_payload = fetch_schedule_payload(normalized_team_id)
             live_games = parse_schedule_payload(live_payload, normalized_team_id)
             if team_id_matches(normalized_team_id, ROOT_TEAM_ID):
